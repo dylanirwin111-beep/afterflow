@@ -1418,6 +1418,7 @@ finally {
         });
         listenForKeybindSettingPresses(KEYBIND_MENU, [](Keybind const&, bool isDown, bool isRepeat, double) {
             if (isDown && !isRepeat) {
+                say("menu key pressed");
                 Loader::get()->queueInMainThread([] {
                     toggleMenu();
                 });
@@ -3568,9 +3569,14 @@ $on_mod(Loaded) {
     removeLegacyTerminalLogs();
     resetTerminalLog();
     startCycleWatcher();
-    if (!Mod::get()->getSavedValue<bool>("menu-keybind-seeded", false)) {
-        Mod::get()->setSettingValue<std::vector<Keybind>>(KEYBIND_MENU, { Keybind::create(KEY_Apostrophe) });
-        Mod::get()->setSavedValue("menu-keybind-seeded", true);
+    if (Mod::get()->getSettingValue<std::vector<Keybind>>(KEYBIND_MENU).empty() &&
+        !Mod::get()->getSavedValue<bool>("menu-keybind-seeded", false)) {
+        Keybind apostropheKeybind {};
+        apostropheKeybind.key = KEY_Apostrophe;
+        Mod::get()->setSettingValue<std::vector<Keybind>>(KEYBIND_MENU, std::vector<Keybind> { apostropheKeybind });
+        if (!Mod::get()->getSettingValue<std::vector<Keybind>>(KEYBIND_MENU).empty()) {
+            Mod::get()->setSavedValue("menu-keybind-seeded", true);
+        }
     }
     setupKeybinds();
     listenForSettingChanges<std::string>("log-level", [](std::string const&) {
@@ -3585,6 +3591,7 @@ $on_mod(Loaded) {
     say("starting mode: {}", stageBanner());
     say("{} cycles anywhere: 2/2 -> 4/4 -> 8/8 -> 16/8 -> 24/12 -> 32/16 -> 40/20 -> off", stageKey());
     say("{} toggles the terminal", terminalKey());
+    say("{} toggles the afterflow menu", keybindList(KEYBIND_MENU));
     say("host os: {} ({})", hostOSName(), hostOSDescription());
     checkForUpdates(true);
 }
