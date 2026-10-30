@@ -17,6 +17,7 @@
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/RingObject.hpp>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -208,6 +209,12 @@ namespace {
 
         std::deque<QueuedInput> queuedInputs;
         int inputShiftTicks = 0;
+        int attemptCorrections = 0;
+        int attemptShiftSum = 0;
+        int attemptShiftMax = 0;
+        int attemptMisses = 0;
+        int markerCount = 0;
+        std::vector<CCPoint>* recordPath = nullptr;
 
         float tickLengthSeconds = TICK_DURATION;
         int ticksSinceInput = 999;
@@ -1147,10 +1154,44 @@ finally {
 #endif
     }
 
+    enum class LogLevel { Quiet = 0, Normal = 1, Verbose = 2 };
+
+    LogLevel currentLogLevel() {
+        auto levelName = Mod::get()->getSettingValue<std::string>("log-level");
+        if (levelName == "quiet") {
+            return LogLevel::Quiet;
+        }
+        if (levelName == "verbose") {
+            return LogLevel::Verbose;
+        }
+        return LogLevel::Normal;
+    }
+
     template <class... Args>
-    void say(fmt::format_string<Args...> formatString, Args&&... arguments) {
+    void sayAt(LogLevel minimumLevel, fmt::format_string<Args...> formatString, Args&&... arguments) {
+        if (static_cast<int>(currentLogLevel()) < static_cast<int>(minimumLevel)) {
+            return;
+        }
         auto message = fmt::format(formatString, std::forward<Args>(arguments)...);
         appendTerminalLog(message);
+    }
+
+    // normal and verbose
+    template <class... Args>
+    void say(fmt::format_string<Args...> formatString, Args&&... arguments) {
+        sayAt(LogLevel::Normal, formatString, std::forward<Args>(arguments)...);
+    }
+
+    // every level, including quiet (errors, update notices, attempt summary)
+    template <class... Args>
+    void sayAlways(fmt::format_string<Args...> formatString, Args&&... arguments) {
+        sayAt(LogLevel::Quiet, formatString, std::forward<Args>(arguments)...);
+    }
+
+    // verbose only (detailed prediction traces)
+    template <class... Args>
+    void sayVerbose(fmt::format_string<Args...> formatString, Args&&... arguments) {
+        sayAt(LogLevel::Verbose, formatString, std::forward<Args>(arguments)...);
     }
 
     std::string keybindList(std::string_view settingName) {
@@ -1232,6 +1273,136 @@ finally {
         return true;
     }
 
+    constexpr char const* KEYBIND_MENU = "keybind-menu";
+    constexpr char const* MENU_ID = "afterflow-menu";
+
+    constexpr std::array<std::pair<char const*, char const*>, 5> MENU_TOGGLES = { {
+        { "show-shift-hud", "tick shift readout" },
+        { "show-correction-markers", "correction markers" },
+        { "show-combo", "save counter" },
+        { "combo-sound", "save counter sound" },
+        { "show-correction-replay", "correction replay" },
+    } };
+
+    class AfterflowMenu : public CCLayerColor {
+    public:
+        static AfterflowMenu* create() {
+            auto* menuLayer = new AfterflowMenu();
+            if (menuLayer && menuLayer->initWithColor({ 0, 0, 0, 140 }) && menuLayer->build()) {
+                menuLayer->autorelease();
+                return menuLayer;
+            }
+            CC_SAFE_DELETE(menuLayer);
+            return nullptr;
+        }
+
+        bool ccTouchBegan(CCTouch*, CCEvent*) override {
+            return true;
+        }
+
+    private:
+        CCMenuItemSpriteExtra* m_logButton = nullptr;
+
+        static std::string logButtonText() {
+            auto levelName = Mod::get()->getSettingValue<std::string>("log-level");
+            return fmt::format("log: {}", levelName);
+        }
+
+        bool build() {
+            this->setID(MENU_ID);
+            this->setTouchMode(kCCTouchesOneByOne);
+            this->setTouchPriority(-500);
+            this->setTouchEnabled(true);
+
+            auto winSize = CCDirector::sharedDirector()->getWinSize();
+            float centerX = winSize.width / 2.f;
+            float centerY = winSize.height / 2.f;
+
+            auto* panel = CCScale9Sprite::create("GJ_square01.png");
+            panel->setContentSize({ 300.f, 260.f });
+            panel->setPosition({ centerX, centerY });
+            this->addChild(panel);
+
+            auto* title = CCLabelBMFont::create("Afterflow", "goldFont.fnt");
+            title->setScale(0.8f);
+            title->setPosition({ centerX, centerY + 110.f });
+            this->addChild(title);
+
+            auto* menu = CCMenu::create();
+            menu->setPosition({ 0.f, 0.f });
+            menu->setTouchPriority(-510);
+            this->addChild(menu);
+
+            float rowY = centerY + 72.f;
+            int rowIndex = 0;
+            for (auto const& entry : MENU_TOGGLES) {
+                auto* label = CCLabelBMFont::create(entry.second, "bigFont.fnt");
+                label->setScale(0.45f);
+                label->setAnchorPoint({ 0.f, 0.5f });
+                label->setPosition({ centerX - 125.f, rowY });
+                this->addChild(label);
+
+                auto* toggler = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(AfterflowMenu::onToggle), 0.7f);
+                toggler->setTag(rowIndex);
+                toggler->toggle(Mod::get()->getSettingValue<bool>(entry.first));
+                toggler->setPosition({ centerX + 110.f, rowY });
+                menu->addChild(toggler);
+
+                rowY -= 32.f;
+                ++rowIndex;
+            }
+
+            auto* logSprite = ButtonSprite::create(logButtonText().c_str());
+            logSprite->setScale(0.8f);
+            m_logButton = CCMenuItemSpriteExtra::create(logSprite, this, menu_selector(AfterflowMenu::onLogLevel));
+            m_logButton->setPosition({ centerX, centerY - 95.f });
+            menu->addChild(m_logButton);
+
+            auto* closeSprite = ButtonSprite::create("close");
+            closeSprite->setScale(0.7f);
+            auto* closeButton = CCMenuItemSpriteExtra::create(closeSprite, this, menu_selector(AfterflowMenu::onClose));
+            closeButton->setPosition({ centerX, centerY - 125.f });
+            menu->addChild(closeButton);
+            return true;
+        }
+
+        void onToggle(CCObject* sender) {
+            int index = static_cast<CCNode*>(sender)->getTag();
+            if (index < 0 || index >= static_cast<int>(MENU_TOGGLES.size())) {
+                return;
+            }
+            auto* settingId = MENU_TOGGLES[index].first;
+            Mod::get()->setSettingValue<bool>(settingId, !Mod::get()->getSettingValue<bool>(settingId));
+        }
+
+        void onLogLevel(CCObject*) {
+            auto levelName = Mod::get()->getSettingValue<std::string>("log-level");
+            std::string nextName = levelName == "quiet" ? "normal" : levelName == "normal" ? "verbose" : "quiet";
+            Mod::get()->setSettingValue<std::string>("log-level", nextName);
+            if (m_logButton) {
+                static_cast<ButtonSprite*>(m_logButton->getNormalImage())->setString(logButtonText().c_str());
+            }
+        }
+
+        void onClose(CCObject*) {
+            this->removeFromParent();
+        }
+    };
+
+    void toggleMenu() {
+        auto* scene = CCScene::get();
+        if (!scene) {
+            return;
+        }
+        if (auto* existingMenu = scene->getChildByID(MENU_ID)) {
+            existingMenu->removeFromParent();
+            return;
+        }
+        if (auto* menuLayer = AfterflowMenu::create()) {
+            scene->addChild(menuLayer, 10000);
+        }
+    }
+
     void setupKeybinds() {
         listenForKeybindSettingPresses(KEYBIND_STAGE, [](Keybind const&, bool isDown, bool isRepeat, double) {
             if (isDown && !isRepeat) {
@@ -1242,6 +1413,14 @@ finally {
         listenForKeybindSettingPresses(KEYBIND_TERMINAL, [](Keybind const&, bool isDown, bool isRepeat, double) {
             if (isDown && !isRepeat) {
                 toggleTerminal();
+            }
+            return true;
+        });
+        listenForKeybindSettingPresses(KEYBIND_MENU, [](Keybind const&, bool isDown, bool isRepeat, double) {
+            if (isDown && !isRepeat) {
+                Loader::get()->queueInMainThread([] {
+                    toggleMenu();
+                });
             }
             return true;
         });
@@ -1335,7 +1514,7 @@ finally {
             [isLoud, installedVersion](web::WebResponse webResponse) {
                 if (!webResponse.ok()) {
                     if (isLoud) {
-                        say("version check failed (http {}), installed v{}", webResponse.code(), installedVersion);
+                        sayAlways("version check failed (http {}), installed v{}", webResponse.code(), installedVersion);
                     }
                     return;
                 }
@@ -1343,7 +1522,7 @@ finally {
                 auto responseBody = webResponse.string();
                 if (!responseBody.isOk()) {
                     if (isLoud) {
-                        say("version check failed: empty response");
+                        sayAlways("version check failed: empty response");
                     }
                     return;
                 }
@@ -1351,7 +1530,7 @@ finally {
                 auto latestVersion = cleanVersion(responseBody.unwrap());
                 if (latestVersion.empty()) {
                     if (isLoud) {
-                        say("version check failed: version.txt is empty");
+                        sayAlways("version check failed: version.txt is empty");
                     }
                     return;
                 }
@@ -1364,8 +1543,8 @@ finally {
                 }
 
                 auto updateUrlText = fmt::format("{}{}", RELEASE_URL_PREFIX, latestVersion);
-                say("out of date: v{} installed, latest is {}", installedVersion, latestVersion);
-                say("update at {}", updateUrlText);
+                sayAlways("out of date: v{} installed, latest is {}", installedVersion, latestVersion);
+                sayAlways("update at {}", updateUrlText);
                 log::warn("afterflow is out of date: v{} installed, latest is {}", installedVersion, latestVersion);
                 log::warn("update at {}", updateUrlText);
 
@@ -1462,7 +1641,7 @@ finally {
             }
             log::warn("terminal process exited: {}", errorLine);
             geode::queueInMainThread([errorLine] {
-                say("terminal failed to open: {}", errorLine);
+                sayAlways("terminal failed to open: {}", errorLine);
             });
         }).detach();
     }
@@ -1725,7 +1904,7 @@ finally {
         }
 
         if (!launchWindowsTerminal() && !launchWindowsTerminalWithWScript()) {
-            say("terminal failed to open");
+            sayAlways("terminal failed to open");
         }
 #else
         log::warn("terminal is not available on this platform");
@@ -1778,7 +1957,7 @@ finally {
         state.robustSaveMode = false;
         state.ignoreTouchingObjects = true;
         state.deathLogEnabled = false;
-        state.explainEnabled = false;
+        state.explainEnabled = currentLogLevel() == LogLevel::Verbose;
         state.lowLatencyMode = false;
         state.predictMovingObjects = false;
         state.shipMaxDelayTicks = 4;
@@ -2168,6 +2347,10 @@ finally {
         state.pressOrbRingObject = nullptr;
         state.inputTickIndex = delayTicks;
         state.isInputDown = isDown;
+        if (state.recordPath) {
+            state.recordPath->clear();
+            state.recordPath->push_back(player1->getPosition());
+        }
 
         bool isSecondPlayer = isDual && state.ghostPlayer2 && player2;
         state.hasRealRectangle = state.ignoreTouchingObjects;
@@ -2257,6 +2440,9 @@ finally {
                 advanceGhost(state.ghostPlayer2, stepDeltaTime);
             }
             releaseAutoClicks();
+            if (state.recordPath) {
+                state.recordPath->push_back(state.ghostPlayer1->getPosition());
+            }
             if (state.hasGhostDied) {
                 hasDied = true;
                 break;
@@ -2660,7 +2846,7 @@ finally {
             }
             if (std::chrono::duration<double, std::milli>(clock::now() - startTime).count() > budgetMilliseconds) {
                 if (!isQuiet) {
-                    say("prediction budget hit at +{} ticks", candidateDelay);
+                    sayVerbose("prediction budget hit at +{} ticks", candidateDelay);
                 }
                 return 0;
             }
@@ -2679,7 +2865,7 @@ finally {
         isCrashFixed = false;
         double remainingBudget = state.budgetMilliseconds - clickMs();
         if (remainingBudget < 0.5) {
-            say("prediction budget hit (quick pass only)");
+            sayVerbose("prediction budget hit (quick pass only)");
             return 0;
         }
         return searchSmallest(horizonTicks, maxDelayTicks, baseDelay, landingTick, scoreFunction, remainingBudget, false, needsFullSearch);
@@ -2768,7 +2954,7 @@ finally {
                 return candidateDelay;
             }
             if (std::chrono::duration<double, std::milli>(clock::now() - startTime).count() > state.budgetMilliseconds) {
-                say("prediction budget hit at +{} ticks", candidateDelay);
+                sayVerbose("prediction budget hit at +{} ticks", candidateDelay);
                 return 0;
             }
         }
@@ -2837,7 +3023,7 @@ finally {
                 return candidateDelay;
             }
             if (hasExceededBudget()) {
-                say("prediction budget hit at +{} ticks", candidateDelay);
+                sayVerbose("prediction budget hit at +{} ticks", candidateDelay);
                 break;
             }
         }
@@ -2846,6 +3032,192 @@ finally {
             return waveBestDelay;
         }
         return 0;
+    }
+
+    void showShiftHud(PlayLayer* gameLayer, bool isDown, int shiftTicks) {
+        if (!gameLayer || !gameLayer->m_uiLayer || shiftTicks <= 0) {
+            return;
+        }
+        if (!Mod::get()->getSettingValue<bool>("show-shift-hud")) {
+            return;
+        }
+        auto* uiLayer = gameLayer->m_uiLayer;
+        auto text = fmt::format("{} +{}t ({:g}f)", isDown ? "press" : "release", shiftTicks, shiftTicks * TICK_DURATION);
+        auto* label = static_cast<CCLabelBMFont*>(uiLayer->getChildByID("afterflow-shift-hud"));
+        if (!label) {
+            label = CCLabelBMFont::create(text.c_str(), "bigFont.fnt");
+            label->setID("afterflow-shift-hud");
+            label->setScale(0.45f);
+            auto winSize = CCDirector::sharedDirector()->getWinSize();
+            label->setPosition({ winSize.width / 2.f, winSize.height - 40.f });
+            uiLayer->addChild(label, 100);
+        } else {
+            label->setString(text.c_str());
+            label->stopAllActions();
+        }
+        label->setOpacity(255);
+        label->runAction(CCSequence::create(CCDelayTime::create(0.8f), CCFadeOut::create(0.3f), nullptr));
+    }
+
+    void playComboSound(int comboCount) {
+        if (!Mod::get()->getSettingValue<bool>("combo-sound")) {
+            return;
+        }
+        float pitch = std::min(1.f + 0.06f * static_cast<float>(comboCount - 1), 2.f);
+        FMODAudioEngine::sharedEngine()->playEffect("counter003.ogg", pitch, 0.f, 0.6f);
+    }
+
+    void showCombo(PlayLayer* gameLayer, int comboCount) {
+        if (!gameLayer || !gameLayer->m_uiLayer || comboCount <= 0) {
+            return;
+        }
+        if (!Mod::get()->getSettingValue<bool>("show-combo")) {
+            return;
+        }
+        auto* uiLayer = gameLayer->m_uiLayer;
+        auto text = fmt::format("{}x", comboCount);
+        auto* label = static_cast<CCLabelBMFont*>(uiLayer->getChildByID("afterflow-combo"));
+        if (!label) {
+            label = CCLabelBMFont::create(text.c_str(), "goldFont.fnt");
+            label->setID("afterflow-combo");
+            auto winSize = CCDirector::sharedDirector()->getWinSize();
+            label->setPosition({ 55.f, winSize.height - 75.f });
+            uiLayer->addChild(label, 100);
+        } else {
+            label->setString(text.c_str());
+            label->stopAllActions();
+        }
+        float baseScale = std::min(0.8f + 0.04f * static_cast<float>(comboCount), 1.4f);
+        label->setOpacity(255);
+        label->setScale(baseScale);
+        label->runAction(CCSequence::create(
+            CCScaleTo::create(0.06f, baseScale * 1.5f),
+            CCScaleTo::create(0.14f, baseScale),
+            CCDelayTime::create(1.8f),
+            CCFadeOut::create(0.4f),
+            nullptr
+        ));
+    }
+
+    void printAttemptSummary() {
+        if (state.attemptCorrections == 0 && state.attemptMisses == 0) {
+            return;
+        }
+        if (state.attemptCorrections > 0) {
+            sayAlways("attempt: {} corrected, avg +{:.1f}t, max +{}t, {} missed", state.attemptCorrections,
+                static_cast<double>(state.attemptShiftSum) / state.attemptCorrections, state.attemptShiftMax, state.attemptMisses);
+        } else {
+            sayAlways("attempt: 0 corrected, {} missed", state.attemptMisses);
+        }
+        state.attemptCorrections = 0;
+        state.attemptShiftSum = 0;
+        state.attemptShiftMax = 0;
+        state.attemptMisses = 0;
+    }
+
+    void dropCorrectionMarkers(PlayLayer* gameLayer) {
+        state.markerCount = 0;
+        if (!gameLayer || !gameLayer->m_objectLayer) {
+            return;
+        }
+        if (auto* markerNode = static_cast<CCDrawNode*>(gameLayer->m_objectLayer->getChildByID("afterflow-markers"))) {
+            markerNode->clear();
+        }
+    }
+
+    void noteShift(PlayLayer* gameLayer, PlayerObject* playerObject, int shiftTicks) {
+        ++state.attemptCorrections;
+        state.attemptShiftSum += shiftTicks;
+        state.attemptShiftMax = std::max(state.attemptShiftMax, shiftTicks);
+        playComboSound(state.attemptCorrections);
+        showCombo(gameLayer, state.attemptCorrections);
+
+        if (!gameLayer || !playerObject || !gameLayer->m_objectLayer) {
+            return;
+        }
+        if (!Mod::get()->getSettingValue<bool>("show-correction-markers")) {
+            return;
+        }
+        auto* markerNode = static_cast<CCDrawNode*>(gameLayer->m_objectLayer->getChildByID("afterflow-markers"));
+        if (!markerNode) {
+            markerNode = CCDrawNode::create();
+            markerNode->setID("afterflow-markers");
+            gameLayer->m_objectLayer->addChild(markerNode, 1000);
+        }
+        if (state.markerCount >= 400) {
+            markerNode->clear();
+            state.markerCount = 0;
+        }
+        ccColor4F markerColor = shiftTicks <= 4  ? ccColor4F { 0.3f, 1.f, 0.4f, 0.85f }
+                              : shiftTicks <= 12 ? ccColor4F { 1.f, 0.9f, 0.2f, 0.85f }
+                                                 : ccColor4F { 1.f, 0.3f, 0.3f, 0.85f };
+        markerNode->drawDot(playerObject->getPosition(), 3.f, markerColor);
+        ++state.markerCount;
+    }
+
+    void drawCorrectionReplay(PlayLayer* gameLayer, PlayerObject* player1, PlayerObject* player2, bool isDual, bool isDown,
+        int savedTick, int horizonTicks, int releaseAfterTicks) {
+        if (!gameLayer || !gameLayer->m_objectLayer || state.isSimulating) {
+            return;
+        }
+        if (!Mod::get()->getSettingValue<bool>("show-correction-replay")) {
+            return;
+        }
+
+        std::vector<CCPoint> uncorrectedPath;
+        std::vector<CCPoint> correctedPath;
+        SimEnd replayEnd;
+        int oldRetapTick = state.retapTick;
+        bool oldOrbClickEnabled = state.orbClickEnabled;
+        state.retapTick = -1;
+        state.orbClickEnabled = false;
+
+        state.recordPath = &uncorrectedPath;
+        simulate(gameLayer, player1, player2, isDual, 0, isDown, horizonTicks, releaseAfterTicks, horizonTicks, &replayEnd);
+        bool uncorrectedDied = state.hasGhostDied;
+
+        state.recordPath = &correctedPath;
+        simulate(gameLayer, player1, player2, isDual, savedTick, isDown, horizonTicks, releaseAfterTicks, horizonTicks, &replayEnd);
+        bool correctedDied = state.hasGhostDied;
+
+        state.recordPath = nullptr;
+        state.retapTick = oldRetapTick;
+        state.orbClickEnabled = oldOrbClickEnabled;
+
+        auto* replayNode = static_cast<CCDrawNode*>(gameLayer->m_objectLayer->getChildByID("afterflow-replay"));
+        if (!replayNode) {
+            replayNode = CCDrawNode::create();
+            replayNode->setID("afterflow-replay");
+            gameLayer->m_objectLayer->addChild(replayNode, 1001);
+        }
+        replayNode->stopAllActions();
+        replayNode->clear();
+
+        ccColor4F uncorrectedColor = { 1.f, 0.25f, 0.25f, 0.9f };
+        ccColor4F correctedColor = { 0.3f, 1.f, 0.4f, 0.9f };
+        for (size_t index = 1; index < uncorrectedPath.size(); ++index) {
+            replayNode->drawSegment(uncorrectedPath[index - 1], uncorrectedPath[index], 1.2f, uncorrectedColor);
+        }
+        for (size_t index = 1; index < correctedPath.size(); ++index) {
+            replayNode->drawSegment(correctedPath[index - 1], correctedPath[index], 1.2f, correctedColor);
+        }
+        if (!uncorrectedPath.empty() && uncorrectedDied) {
+            replayNode->drawDot(uncorrectedPath.back(), 5.f, uncorrectedColor);
+        }
+        if (!correctedPath.empty()) {
+            replayNode->drawDot(correctedPath.back(), correctedDied ? 5.f : 3.f, correctedColor);
+        }
+        if (!correctedPath.empty()) {
+            replayNode->drawDot(correctedPath.front(), 3.f, ccColor4F { 1.f, 1.f, 1.f, 0.9f });
+        }
+        sayVerbose("replay: uncorrected {} after {} points, corrected {} after {} points", uncorrectedDied ? "dies" : "survives",
+            uncorrectedPath.size(), correctedDied ? "dies" : "survives", correctedPath.size());
+
+        replayNode->runAction(CCSequence::create(
+            CCDelayTime::create(3.f),
+            CallFuncExt::create([replayNode] { replayNode->clear(); }),
+            nullptr
+        ));
     }
 
     void queueInput(int tickCount, bool isDown) {
@@ -3003,6 +3375,8 @@ finally {
             if (candidateDelay > 0) {
                 say("orb {} +{}t ({:g}f) -> {}t", state.wasOrbTiming ? "timing" : "press", candidateDelay, candidateDelay * TICK_DURATION, orbLandingTick);
                 state.inputShiftTicks = candidateDelay;
+                showShiftHud(playLayer, isDown, candidateDelay);
+                noteShift(playLayer, player1, candidateDelay);
                 queueInput(candidateDelay - earlyTicks, isDown);
                 return true;
             }
@@ -3028,6 +3402,7 @@ finally {
 
         std::string tickTagText = midTickFraction > 0.f ? fmt::format(" @{:.2f}", midTickFraction) : std::string();
         if (baseDelay >= horizonTicks) {
+            sayVerbose("clear: {}{} survives {}t, left alone", isDown ? "press" : "release", tickTagText, horizonTicks);
             state.hasAppliedInput = isDown;
             return false;
         }
@@ -3043,6 +3418,7 @@ finally {
         isCrashFixed = false;
         int neededTicks = (isGroundPress || isRobotPress || isUfoPress) ? horizonTicks : std::min(horizonTicks, baseDelay + st(12));
 
+        sayVerbose("search: {}{} dies in {}t, trying +1..+{}t", isDown ? "press" : "release", tickTagText, baseDelay, maxDelayTicks);
         savedTick = isCubeStyleWave ? searchWave(playLayer, player1, player2, isDual, isDown, horizonTicks, maxDelayTicks, baseDelay, &landingTick)
               : isRobotPress    ? searchTwoPass(horizonTicks, maxDelayTicks, baseDelay, &landingTick, [&](int candidateDelay, int targetTick, SimEnd* simulationEnd) {
                     return robotScore(playLayer, player1, player2, isDual, candidateDelay, horizonTicks, targetTick, simulationEnd);
@@ -3060,6 +3436,7 @@ finally {
                                     isGroundPress);
 
         if (savedTick <= 0) {
+            ++state.attemptMisses;
             say("no save: {}{} dies in {}t (max {}t, best +{}t -> {}t of {})", isDown ? "press" : "release", tickTagText, baseDelay, maxDelayTicks,
                 debugBestDelay, debugBestResult, horizonTicks);
             state.hasAppliedInput = isDown;
@@ -3089,6 +3466,9 @@ finally {
             isCubeStyleWave && isMarginUsed ? std::string("  +margin")
             : isRobotPress ? fmt::format("  hold {}t", robotUsedHoldTicks) : std::string());
         state.inputShiftTicks = savedTick;
+        showShiftHud(playLayer, isDown, savedTick);
+        noteShift(playLayer, player1, savedTick);
+        drawCorrectionReplay(playLayer, player1, player2, isDual, isDown, savedTick, horizonTicks, releaseAfterTicks);
         queueInput(savedTick - earlyTicks, isDown);
         return true;
     }
@@ -3188,7 +3568,14 @@ $on_mod(Loaded) {
     removeLegacyTerminalLogs();
     resetTerminalLog();
     startCycleWatcher();
+    if (!Mod::get()->getSavedValue<bool>("menu-keybind-seeded", false)) {
+        Mod::get()->setSettingValue<std::vector<Keybind>>(KEYBIND_MENU, { Keybind::create(KEY_Apostrophe) });
+        Mod::get()->setSavedValue("menu-keybind-seeded", true);
+    }
     setupKeybinds();
+    listenForSettingChanges<std::string>("log-level", [](std::string const&) {
+        state.explainEnabled = currentLogLevel() == LogLevel::Verbose;
+    });
     listenForSettingChanges<bool>("terminal-enabled", [](bool enabled) {
         writeTerminalFlags();
         if (!enabled) {
@@ -3236,6 +3623,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         dropGhosts();
         readSettings();
         applyStage();
+        state.markerCount = 0;
+        state.attemptCorrections = state.attemptShiftSum = state.attemptShiftMax = state.attemptMisses = 0;
         state.ghostPlayer1 = makeGhost(this);
         state.ghostPlayer2 = makeGhost(this);
         state.ghostLayerBaseIndex = state.ghostRenderLayer->getChildrenCount();
@@ -3253,12 +3642,14 @@ class $modify(BufPlayLayer, PlayLayer) {
     }
 
     void onQuit() {
+        printAttemptSummary();
         resetPending();
         dropGhosts();
         PlayLayer::onQuit();
     }
 
     void resetLevel() {
+        printAttemptSummary();
         resetPending();
         forgetPress();
         state.hasAppliedInput = false;
