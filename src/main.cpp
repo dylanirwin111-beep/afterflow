@@ -18,6 +18,7 @@
 #include <Geode/modify/RingObject.hpp>
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -1273,22 +1274,53 @@ finally {
         return true;
     }
 
+    ccColor3B accentColor() {
+        return ccc3(176, 140, 255);
+    }
+
+    ccColor3B shiftColor(int shiftTicks) {
+        if (shiftTicks <= 4) {
+            return ccc3(90, 255, 120);
+        }
+        if (shiftTicks <= 12) {
+            return ccc3(255, 225, 70);
+        }
+        return ccc3(255, 90, 90);
+    }
+
+    CCScale9Sprite* makeScale9(char const* frameName, CCSize size, ccColor3B color, GLubyte opacity) {
+        auto* sprite = CCScale9Sprite::create(frameName);
+        if (!sprite) {
+            sprite = CCScale9Sprite::create("GJ_square01.png");
+        }
+        sprite->setContentSize(size);
+        sprite->setColor(color);
+        sprite->setOpacity(opacity);
+        return sprite;
+    }
+
+    void showShiftHud(PlayLayer* gameLayer, bool isDown, int shiftTicks);
+    void showCombo(PlayLayer* gameLayer, int comboCount);
+    void playComboSound(int comboCount);
+
     constexpr char const* KEYBIND_MENU = "keybind-menu";
     constexpr char const* MENU_ID = "afterflow-menu";
 
     constexpr std::array<std::pair<char const*, char const*>, 5> MENU_TOGGLES = { {
         { "show-shift-hud", "tick shift readout" },
         { "show-correction-markers", "correction markers" },
-        { "show-combo", "save counter" },
-        { "combo-sound", "save counter sound" },
         { "show-correction-replay", "correction replay" },
+        { "show-combo", "save counter" },
+        { "combo-sound", "counter sound" },
     } };
+
+    constexpr std::array<char const*, 3> LOG_LEVEL_NAMES = { "quiet", "normal", "verbose" };
 
     class AfterflowMenu : public CCLayerColor {
     public:
         static AfterflowMenu* create() {
             auto* menuLayer = new AfterflowMenu();
-            if (menuLayer && menuLayer->initWithColor({ 0, 0, 0, 140 }) && menuLayer->build()) {
+            if (menuLayer && menuLayer->initWithColor({ 0, 0, 0, 255 }) && menuLayer->build()) {
                 menuLayer->autorelease();
                 return menuLayer;
             }
@@ -1301,11 +1333,38 @@ finally {
         }
 
     private:
-        CCMenuItemSpriteExtra* m_logButton = nullptr;
+        struct ToggleRow {
+            CCScale9Sprite* card = nullptr;
+            CCLabelBMFont* label = nullptr;
+        };
+        std::array<ToggleRow, 5> m_rows {};
+        std::array<CCScale9Sprite*, 3> m_segmentBackgrounds {};
+        std::array<CCLabelBMFont*, 3> m_segmentLabels {};
 
-        static std::string logButtonText() {
-            auto levelName = Mod::get()->getSettingValue<std::string>("log-level");
-            return fmt::format("log: {}", levelName);
+        void styleRow(int rowIndex) {
+            bool isOn = Mod::get()->getSettingValue<bool>(MENU_TOGGLES[rowIndex].first);
+            auto& row = m_rows[rowIndex];
+            if (row.card) {
+                row.card->setColor(isOn ? ccc3(92, 56, 160) : ccc3(0, 0, 0));
+                row.card->setOpacity(isOn ? 215 : 120);
+            }
+            if (row.label) {
+                row.label->setColor(isOn ? ccc3(255, 255, 255) : ccc3(150, 150, 165));
+            }
+        }
+
+        void styleSegments() {
+            auto currentLevel = Mod::get()->getSettingValue<std::string>("log-level");
+            for (size_t index = 0; index < LOG_LEVEL_NAMES.size(); ++index) {
+                bool isActive = currentLevel == LOG_LEVEL_NAMES[index];
+                if (m_segmentBackgrounds[index]) {
+                    m_segmentBackgrounds[index]->setColor(isActive ? ccc3(124, 84, 224) : ccc3(0, 0, 0));
+                    m_segmentBackgrounds[index]->setOpacity(isActive ? 240 : 120);
+                }
+                if (m_segmentLabels[index]) {
+                    m_segmentLabels[index]->setColor(isActive ? ccc3(255, 255, 255) : ccc3(150, 150, 165));
+                }
+            }
         }
 
         bool build() {
@@ -1313,56 +1372,113 @@ finally {
             this->setTouchMode(kCCTouchesOneByOne);
             this->setTouchPriority(-500);
             this->setTouchEnabled(true);
+            this->setOpacity(0);
+            this->runAction(CCFadeTo::create(0.18f, 180));
 
             auto winSize = CCDirector::sharedDirector()->getWinSize();
-            float centerX = winSize.width / 2.f;
-            float centerY = winSize.height / 2.f;
+            auto* root = CCNode::create();
+            root->setPosition({ winSize.width / 2.f, winSize.height / 2.f });
+            root->setScale(0.85f);
+            root->runAction(CCEaseBackOut::create(CCScaleTo::create(0.22f, 1.f)));
+            this->addChild(root);
 
-            auto* panel = CCScale9Sprite::create("GJ_square01.png");
-            panel->setContentSize({ 300.f, 260.f });
-            panel->setPosition({ centerX, centerY });
-            this->addChild(panel);
+            auto accent = accentColor();
 
-            auto* title = CCLabelBMFont::create("Afterflow", "goldFont.fnt");
+            // panel: purple frame around a dark body
+            root->addChild(makeScale9("GJ_square01.png", { 332.f, 298.f }, ccc3(126, 92, 230), 255), 0);
+            root->addChild(makeScale9("square02_001.png", { 322.f, 288.f }, ccc3(8, 8, 16), 232), 0);
+
+            auto* title = CCLabelBMFont::create("AFTERFLOW", "goldFont.fnt");
             title->setScale(0.8f);
-            title->setPosition({ centerX, centerY + 110.f });
-            this->addChild(title);
+            title->setPosition({ 0.f, 122.f });
+            root->addChild(title, 2);
+
+            auto* subtitle = CCLabelBMFont::create("predictive input buffer", "chatFont.fnt");
+            subtitle->setScale(0.55f);
+            subtitle->setColor(ccc3(160, 150, 190));
+            subtitle->setPosition({ 0.f, 104.f });
+            root->addChild(subtitle, 2);
+
+            auto* divider = CCLayerColor::create(ccc4(176, 140, 255, 70), 290.f, 1.f);
+            divider->setPosition({ -145.f, 94.f });
+            root->addChild(divider, 1);
 
             auto* menu = CCMenu::create();
             menu->setPosition({ 0.f, 0.f });
             menu->setTouchPriority(-510);
-            this->addChild(menu);
+            root->addChild(menu, 5);
 
-            float rowY = centerY + 72.f;
-            int rowIndex = 0;
-            for (auto const& entry : MENU_TOGGLES) {
-                auto* label = CCLabelBMFont::create(entry.second, "bigFont.fnt");
-                label->setScale(0.45f);
+            auto addHeader = [&](char const* text, float y) {
+                auto* header = CCLabelBMFont::create(text, "bigFont.fnt");
+                header->setScale(0.3f);
+                header->setColor(accent);
+                header->setAnchorPoint({ 0.f, 0.5f });
+                header->setPosition({ -145.f, y });
+                root->addChild(header, 2);
+            };
+            addHeader("DISPLAY", 80.f);
+            addHeader("SAVE COUNTER", -12.f);
+            addHeader("TERMINAL LOG", -80.f);
+
+            constexpr std::array<float, 5> rowPositions = { 58.f, 33.f, 8.f, -34.f, -59.f };
+            for (int rowIndex = 0; rowIndex < static_cast<int>(MENU_TOGGLES.size()); ++rowIndex) {
+                float rowY = rowPositions[rowIndex];
+                auto* card = makeScale9("square02_001.png", { 290.f, 22.f }, ccc3(0, 0, 0), 120);
+                card->setPosition({ 0.f, rowY });
+                root->addChild(card, 1);
+
+                auto* label = CCLabelBMFont::create(MENU_TOGGLES[rowIndex].second, "bigFont.fnt");
+                label->setScale(0.4f);
                 label->setAnchorPoint({ 0.f, 0.5f });
-                label->setPosition({ centerX - 125.f, rowY });
-                this->addChild(label);
+                label->setPosition({ -135.f, rowY });
+                root->addChild(label, 2);
 
-                auto* toggler = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(AfterflowMenu::onToggle), 0.7f);
+                auto* toggler = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(AfterflowMenu::onToggle), 0.55f);
                 toggler->setTag(rowIndex);
-                toggler->toggle(Mod::get()->getSettingValue<bool>(entry.first));
-                toggler->setPosition({ centerX + 110.f, rowY });
+                toggler->toggle(Mod::get()->getSettingValue<bool>(MENU_TOGGLES[rowIndex].first));
+                toggler->setPosition({ 122.f, rowY });
                 menu->addChild(toggler);
 
-                rowY -= 32.f;
-                ++rowIndex;
+                m_rows[rowIndex].card = card;
+                m_rows[rowIndex].label = label;
+                styleRow(rowIndex);
             }
 
-            auto* logSprite = ButtonSprite::create(logButtonText().c_str());
-            logSprite->setScale(0.8f);
-            m_logButton = CCMenuItemSpriteExtra::create(logSprite, this, menu_selector(AfterflowMenu::onLogLevel));
-            m_logButton->setPosition({ centerX, centerY - 95.f });
-            menu->addChild(m_logButton);
+            for (int segmentIndex = 0; segmentIndex < static_cast<int>(LOG_LEVEL_NAMES.size()); ++segmentIndex) {
+                auto* background = makeScale9("square02_001.png", { 88.f, 22.f }, ccc3(0, 0, 0), 120);
+                auto* label = CCLabelBMFont::create(LOG_LEVEL_NAMES[segmentIndex], "bigFont.fnt");
+                label->setScale(0.36f);
+                label->setPosition({ 44.f, 11.f });
+                background->addChild(label);
+
+                auto* segment = CCMenuItemSpriteExtra::create(background, this, menu_selector(AfterflowMenu::onSegment));
+                segment->setTag(segmentIndex);
+                segment->setPosition({ (static_cast<float>(segmentIndex) - 1.f) * 94.f, -101.f });
+                menu->addChild(segment);
+
+                m_segmentBackgrounds[segmentIndex] = background;
+                m_segmentLabels[segmentIndex] = label;
+            }
+            styleSegments();
+
+            auto* previewSprite = ButtonSprite::create("preview");
+            previewSprite->setScale(0.6f);
+            auto* previewButton = CCMenuItemSpriteExtra::create(previewSprite, this, menu_selector(AfterflowMenu::onPreview));
+            previewButton->setPosition({ -62.f, -126.f });
+            menu->addChild(previewButton);
 
             auto* closeSprite = ButtonSprite::create("close");
-            closeSprite->setScale(0.7f);
+            closeSprite->setScale(0.6f);
             auto* closeButton = CCMenuItemSpriteExtra::create(closeSprite, this, menu_selector(AfterflowMenu::onClose));
-            closeButton->setPosition({ centerX, centerY - 125.f });
+            closeButton->setPosition({ 62.f, -126.f });
             menu->addChild(closeButton);
+
+            auto hintText = fmt::format("press {} to close", keybindList(KEYBIND_MENU));
+            auto* hint = CCLabelBMFont::create(hintText.c_str(), "chatFont.fnt");
+            hint->setScale(0.5f);
+            hint->setColor(ccc3(130, 125, 150));
+            hint->setPosition({ 0.f, -141.f });
+            root->addChild(hint, 2);
             return true;
         }
 
@@ -1373,15 +1489,26 @@ finally {
             }
             auto* settingId = MENU_TOGGLES[index].first;
             Mod::get()->setSettingValue<bool>(settingId, !Mod::get()->getSettingValue<bool>(settingId));
+            styleRow(index);
         }
 
-        void onLogLevel(CCObject*) {
-            auto levelName = Mod::get()->getSettingValue<std::string>("log-level");
-            std::string nextName = levelName == "quiet" ? "normal" : levelName == "normal" ? "verbose" : "quiet";
-            Mod::get()->setSettingValue<std::string>("log-level", nextName);
-            if (m_logButton) {
-                static_cast<ButtonSprite*>(m_logButton->getNormalImage())->setString(logButtonText().c_str());
+        void onSegment(CCObject* sender) {
+            int index = static_cast<CCNode*>(sender)->getTag();
+            if (index < 0 || index >= static_cast<int>(LOG_LEVEL_NAMES.size())) {
+                return;
             }
+            Mod::get()->setSettingValue<std::string>("log-level", LOG_LEVEL_NAMES[index]);
+            styleSegments();
+        }
+
+        void onPreview(CCObject*) {
+            auto* playLayer = GameManager::get()->m_playLayer;
+            if (!playLayer) {
+                return;
+            }
+            showShiftHud(playLayer, true, 7);
+            showCombo(playLayer, 6);
+            playComboSound(6);
         }
 
         void onClose(CCObject*) {
@@ -3043,21 +3170,44 @@ finally {
             return;
         }
         auto* uiLayer = gameLayer->m_uiLayer;
-        auto text = fmt::format("{} +{}t ({:g}f)", isDown ? "press" : "release", shiftTicks, shiftTicks * TICK_DURATION);
-        auto* label = static_cast<CCLabelBMFont*>(uiLayer->getChildByID("afterflow-shift-hud"));
-        if (!label) {
-            label = CCLabelBMFont::create(text.c_str(), "bigFont.fnt");
-            label->setID("afterflow-shift-hud");
-            label->setScale(0.45f);
-            auto winSize = CCDirector::sharedDirector()->getWinSize();
-            label->setPosition({ winSize.width / 2.f, winSize.height - 40.f });
-            uiLayer->addChild(label, 100);
-        } else {
-            label->setString(text.c_str());
-            label->stopAllActions();
+        if (auto* oldHud = uiLayer->getChildByID("afterflow-shift-hud")) {
+            oldHud->removeFromParent();
         }
-        label->setOpacity(255);
-        label->runAction(CCSequence::create(CCDelayTime::create(0.8f), CCFadeOut::create(0.3f), nullptr));
+
+        auto accent = shiftColor(shiftTicks);
+        auto mainText = fmt::format("{} +{}t", isDown ? "PRESS" : "RELEASE", shiftTicks);
+        auto subText = fmt::format("{:g} frames at 60fps", shiftTicks * TICK_DURATION);
+
+        auto* mainLabel = CCLabelBMFont::create(mainText.c_str(), "bigFont.fnt");
+        mainLabel->setScale(0.5f);
+        mainLabel->setColor(accent);
+        mainLabel->setPosition({ 0.f, 6.f });
+
+        auto* subLabel = CCLabelBMFont::create(subText.c_str(), "chatFont.fnt");
+        subLabel->setScale(0.5f);
+        subLabel->setColor(ccc3(190, 190, 205));
+        subLabel->setPosition({ 0.f, -9.f });
+
+        float width = std::max(mainLabel->getContentSize().width * 0.5f + 40.f, 120.f);
+        auto* border = makeScale9("square02_001.png", { width + 3.f, 40.f }, accent, 255);
+        auto* body = makeScale9("square02_001.png", { width, 37.f }, ccc3(10, 10, 18), 215);
+
+        auto* root = CCNode::create();
+        root->setID("afterflow-shift-hud");
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        root->setPosition({ winSize.width / 2.f, winSize.height - 40.f });
+        root->addChild(border, 0);
+        root->addChild(body, 1);
+        root->addChild(mainLabel, 2);
+        root->addChild(subLabel, 2);
+
+        root->setScale(0.7f);
+        root->runAction(CCEaseBackOut::create(CCScaleTo::create(0.14f, 1.f)));
+        for (auto* fadeNode : { static_cast<CCNode*>(border), static_cast<CCNode*>(body), static_cast<CCNode*>(mainLabel), static_cast<CCNode*>(subLabel) }) {
+            fadeNode->runAction(CCSequence::create(CCDelayTime::create(1.0f), CCFadeOut::create(0.3f), nullptr));
+        }
+        root->runAction(CCSequence::create(CCDelayTime::create(1.5f), CallFuncExt::create([root] { root->removeFromParent(); }), nullptr));
+        uiLayer->addChild(root, 100);
     }
 
     void playComboSound(int comboCount) {
@@ -3076,28 +3226,44 @@ finally {
             return;
         }
         auto* uiLayer = gameLayer->m_uiLayer;
-        auto text = fmt::format("{}x", comboCount);
-        auto* label = static_cast<CCLabelBMFont*>(uiLayer->getChildByID("afterflow-combo"));
-        if (!label) {
-            label = CCLabelBMFont::create(text.c_str(), "goldFont.fnt");
-            label->setID("afterflow-combo");
-            auto winSize = CCDirector::sharedDirector()->getWinSize();
-            label->setPosition({ 55.f, winSize.height - 75.f });
-            uiLayer->addChild(label, 100);
-        } else {
-            label->setString(text.c_str());
-            label->stopAllActions();
+        if (auto* oldCombo = uiLayer->getChildByID("afterflow-combo")) {
+            oldCombo->removeFromParent();
         }
-        float baseScale = std::min(0.8f + 0.04f * static_cast<float>(comboCount), 1.4f);
-        label->setOpacity(255);
-        label->setScale(baseScale);
-        label->runAction(CCSequence::create(
-            CCScaleTo::create(0.06f, baseScale * 1.5f),
-            CCScaleTo::create(0.14f, baseScale),
-            CCDelayTime::create(1.8f),
-            CCFadeOut::create(0.4f),
-            nullptr
-        ));
+
+        ccColor3B tint = comboCount >= 20 ? ccc3(190, 120, 255)
+                       : comboCount >= 10 ? ccc3(255, 90, 130)
+                       : comboCount >= 5  ? ccc3(255, 150, 60)
+                                          : ccc3(255, 215, 90);
+        char const* caption = comboCount >= 20 ? "UNREAL" : comboCount >= 10 ? "INSANE" : comboCount >= 5 ? "NICE" : "SAVES";
+        float baseScale = std::min(0.75f + 0.03f * static_cast<float>(comboCount), 1.25f);
+
+        auto numberText = fmt::format("{}x", comboCount);
+        auto* numberLabel = CCLabelBMFont::create(numberText.c_str(), "bigFont.fnt");
+        numberLabel->setScale(baseScale);
+        numberLabel->setColor(tint);
+        numberLabel->setPosition({ 0.f, 6.f });
+
+        auto* captionLabel = CCLabelBMFont::create(caption, "bigFont.fnt");
+        captionLabel->setScale(0.28f);
+        captionLabel->setColor(tint);
+        captionLabel->setOpacity(200);
+        captionLabel->setPosition({ 0.f, -14.f * baseScale });
+
+        auto* root = CCNode::create();
+        root->setID("afterflow-combo");
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        root->setPosition({ 62.f, winSize.height - 88.f });
+        root->addChild(numberLabel);
+        root->addChild(captionLabel);
+
+        root->setScale(0.4f);
+        root->runAction(CCSequence::create(CCScaleTo::create(0.07f, 1.3f), CCScaleTo::create(0.12f, 1.f), nullptr));
+        numberLabel->runAction(CCSequence::create(CCRotateTo::create(0.05f, -6.f), CCRotateTo::create(0.09f, 6.f), CCRotateTo::create(0.07f, 0.f), nullptr));
+        for (auto* fadeNode : { static_cast<CCNode*>(numberLabel), static_cast<CCNode*>(captionLabel) }) {
+            fadeNode->runAction(CCSequence::create(CCDelayTime::create(1.7f), CCFadeOut::create(0.4f), nullptr));
+        }
+        root->runAction(CCSequence::create(CCDelayTime::create(2.2f), CallFuncExt::create([root] { root->removeFromParent(); }), nullptr));
+        uiLayer->addChild(root, 100);
     }
 
     void printAttemptSummary() {
@@ -3152,7 +3318,9 @@ finally {
         ccColor4F markerColor = shiftTicks <= 4  ? ccColor4F { 0.3f, 1.f, 0.4f, 0.85f }
                               : shiftTicks <= 12 ? ccColor4F { 1.f, 0.9f, 0.2f, 0.85f }
                                                  : ccColor4F { 1.f, 0.3f, 0.3f, 0.85f };
-        markerNode->drawDot(playerObject->getPosition(), 3.f, markerColor);
+        ccColor4F glowColor = { markerColor.r, markerColor.g, markerColor.b, 0.22f };
+        markerNode->drawDot(playerObject->getPosition(), 6.f, glowColor);
+        markerNode->drawDot(playerObject->getPosition(), 2.8f, markerColor);
         ++state.markerCount;
     }
 
@@ -3194,28 +3362,50 @@ finally {
         replayNode->stopAllActions();
         replayNode->clear();
 
-        ccColor4F uncorrectedColor = { 1.f, 0.25f, 0.25f, 0.9f };
-        ccColor4F correctedColor = { 0.3f, 1.f, 0.4f, 0.9f };
-        for (size_t index = 1; index < uncorrectedPath.size(); ++index) {
-            replayNode->drawSegment(uncorrectedPath[index - 1], uncorrectedPath[index], 1.2f, uncorrectedColor);
-        }
-        for (size_t index = 1; index < correctedPath.size(); ++index) {
-            replayNode->drawSegment(correctedPath[index - 1], correctedPath[index], 1.2f, correctedColor);
-        }
-        if (!uncorrectedPath.empty() && uncorrectedDied) {
-            replayNode->drawDot(uncorrectedPath.back(), 5.f, uncorrectedColor);
-        }
-        if (!correctedPath.empty()) {
-            replayNode->drawDot(correctedPath.back(), correctedDied ? 5.f : 3.f, correctedColor);
-        }
-        if (!correctedPath.empty()) {
-            replayNode->drawDot(correctedPath.front(), 3.f, ccColor4F { 1.f, 1.f, 1.f, 0.9f });
-        }
         sayVerbose("replay: uncorrected {} after {} points, corrected {} after {} points", uncorrectedDied ? "dies" : "survives",
             uncorrectedPath.size(), correctedDied ? "dies" : "survives", correctedPath.size());
 
+        auto uncorrectedShared = std::make_shared<std::vector<CCPoint>>(std::move(uncorrectedPath));
+        auto correctedShared = std::make_shared<std::vector<CCPoint>>(std::move(correctedPath));
+        auto stepIndex = std::make_shared<size_t>(1);
+        size_t stepCount = std::max(uncorrectedShared->size(), correctedShared->size());
+        if (stepCount < 2) {
+            return;
+        }
+        --stepCount;
+
+        if (!correctedShared->empty()) {
+            replayNode->drawDot(correctedShared->front(), 7.f, ccColor4F { 1.f, 1.f, 1.f, 0.25f });
+            replayNode->drawDot(correctedShared->front(), 3.f, ccColor4F { 1.f, 1.f, 1.f, 0.95f });
+        }
+
+        auto drawStep = [replayNode, uncorrectedShared, correctedShared, stepIndex, uncorrectedDied, correctedDied] {
+            ccColor4F uncorrectedColor = { 1.f, 0.28f, 0.28f, 0.95f };
+            ccColor4F correctedColor = { 0.3f, 1.f, 0.45f, 0.95f };
+            size_t index = *stepIndex;
+            auto drawPath = [&](std::vector<CCPoint> const& path, ccColor4F color, bool isEndMarked) {
+                if (index >= path.size()) {
+                    return;
+                }
+                ccColor4F glowColor = { color.r, color.g, color.b, 0.2f };
+                replayNode->drawSegment(path[index - 1], path[index], 3.4f, glowColor);
+                replayNode->drawSegment(path[index - 1], path[index], 1.2f, color);
+                if (index + 1 == path.size()) {
+                    replayNode->drawDot(path[index], 7.f, glowColor);
+                    replayNode->drawDot(path[index], isEndMarked ? 4.5f : 2.5f, color);
+                }
+            };
+            drawPath(*uncorrectedShared, uncorrectedColor, uncorrectedDied);
+            drawPath(*correctedShared, correctedColor, correctedDied);
+            ++(*stepIndex);
+        };
+
         replayNode->runAction(CCSequence::create(
-            CCDelayTime::create(3.f),
+            CCRepeat::create(
+                CCSequence::create(CCDelayTime::create(0.006f), CallFuncExt::create(drawStep), nullptr),
+                static_cast<unsigned int>(stepCount)
+            ),
+            CCDelayTime::create(2.5f),
             CallFuncExt::create([replayNode] { replayNode->clear(); }),
             nullptr
         ));
