@@ -26,6 +26,12 @@
             "description": "allow the terminal key to open the afterflow log window",
             "default": true
         },
+        "show-shift-hud": {
+            "type": "bool",
+            "name": "show tick shift on screen",
+            "description": "briefly show the tick shift applied to each corrected input at the top of the screen. note: this is part of the game view, so it appears in recordings",
+            "default": false
+        },
         "keybinds-title": {
             "type": "title",
             "name": "keybinds",
