@@ -32,6 +32,37 @@
             "description": "briefly show the tick shift applied to each corrected input at the top of the screen. note: this is part of the game view, so it appears in recordings",
             "default": false
         },
+        "show-correction-markers": {
+            "type": "bool",
+            "name": "show correction markers",
+            "description": "draw a colored dot in the level where each input was shifted: green small, yellow medium, red large. note: this is part of the game view, so it appears in recordings",
+            "default": false
+        },
+        "show-combo": {
+            "type": "bool",
+            "name": "show save counter",
+            "description": "show a 1x, 2x, 3x counter that pops each time an input is saved. resets every attempt. appears in recordings",
+            "default": false
+        },
+        "combo-sound": {
+            "type": "bool",
+            "name": "save counter sound",
+            "description": "play a sound on each save that rises in pitch as the counter goes up",
+            "default": false
+        },
+        "show-correction-replay": {
+            "type": "bool",
+            "name": "show correction replay",
+            "description": "after a save, draw the ghost path for the uncorrected input (red) next to the corrected one (green) for 3 seconds. appears in recordings",
+            "default": false
+        },
+        "log-level": {
+            "type": "string",
+            "name": "terminal log level",
+            "description": "quiet: attempt summary and errors only. normal: every save. verbose: also the detailed prediction traces",
+            "default": "normal",
+            "one-of": ["quiet", "normal", "verbose"]
+        },
         "keybinds-title": {
             "type": "title",
             "name": "keybinds",
@@ -50,6 +81,13 @@
             "description": "open or close the afterflow terminal",
             "category": "universal",
             "default": ["F9"]
+        },
+        "keybind-menu": {
+            "type": "keybind",
+            "name": "menu",
+            "description": "open or close the afterflow menu (set to the apostrophe key on first launch)",
+            "category": "universal",
+            "default": []
         }
     }
 }
