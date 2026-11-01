@@ -63,6 +63,58 @@
             "default": "normal",
             "one-of": ["quiet", "normal", "verbose"]
         },
+        "show-ghost-race": {
+            "type": "bool",
+            "name": "show ghost race",
+            "description": "after a save, a ghost dot runs the uncorrected path next to you. appears in recordings",
+            "default": false
+        },
+        "show-timeline": {
+            "type": "bool",
+            "name": "show click timeline",
+            "description": "strip at the bottom of the screen comparing when you clicked and when the input landed. appears in recordings",
+            "default": false
+        },
+        "show-bias": {
+            "type": "bool",
+            "name": "show early / late readout",
+            "description": "small text with your average click offset this attempt. appears in recordings",
+            "default": false
+        },
+        "danger-preview": {
+            "type": "bool",
+            "name": "danger glow",
+            "description": "glow on the player when a click right now would die. runs a short prediction a few times a second. appears in recordings",
+            "default": false
+        },
+        "show-medals": {
+            "type": "bool",
+            "name": "show streak medals",
+            "description": "medal and screen edge pulse at 5, 10, 25 and 50 saves in one attempt. appears in recordings",
+            "default": false
+        },
+        "combo-sound-pack": {
+            "type": "string",
+            "name": "counter sound pack",
+            "description": "which sound plays on each save",
+            "default": "tick",
+            "one-of": ["tick", "click", "coin", "chest", "score"]
+        },
+        "combo-volume": {
+            "type": "float",
+            "name": "counter volume",
+            "description": "volume of the save counter sound",
+            "default": 0.6,
+            "min": 0.0,
+            "max": 1.0
+        },
+        "theme": {
+            "type": "string",
+            "name": "menu theme",
+            "description": "accent color of the afterflow menu",
+            "default": "purple",
+            "one-of": ["purple", "cyan", "orange", "green", "pink"]
+        },
         "keybinds-title": {
             "type": "title",
             "name": "keybinds",
