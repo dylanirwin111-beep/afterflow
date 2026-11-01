@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <deque>
+#include <fstream>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -215,6 +217,9 @@ namespace {
         int attemptShiftMax = 0;
         int attemptMisses = 0;
         int markerCount = 0;
+        int attemptInputs = 0;
+        int attemptClean = 0;
+        int dangerTicker = 0;
         std::vector<CCPoint>* recordPath = nullptr;
 
         float tickLengthSeconds = TICK_DURATION;
@@ -1274,8 +1279,43 @@ finally {
         return true;
     }
 
+    struct Theme {
+        ccColor3B accent;
+        ccColor3B frame;
+        ccColor3B cardOn;
+        ccColor3B segmentOn;
+    };
+
+    Theme currentTheme() {
+        auto themeName = Mod::get()->getSettingValue<std::string>("theme");
+        if (themeName == "cyan") {
+            return { ccc3(110, 220, 255), ccc3(40, 150, 200), ccc3(24, 90, 130), ccc3(30, 140, 190) };
+        }
+        if (themeName == "orange") {
+            return { ccc3(255, 170, 90), ccc3(220, 120, 40), ccc3(150, 80, 20), ccc3(210, 110, 30) };
+        }
+        if (themeName == "green") {
+            return { ccc3(120, 255, 150), ccc3(50, 170, 90), ccc3(30, 110, 60), ccc3(40, 160, 80) };
+        }
+        if (themeName == "pink") {
+            return { ccc3(255, 140, 200), ccc3(220, 80, 150), ccc3(150, 40, 100), ccc3(210, 70, 140) };
+        }
+        return { ccc3(176, 140, 255), ccc3(126, 92, 230), ccc3(92, 56, 160), ccc3(124, 84, 224) };
+    }
+
     ccColor3B accentColor() {
-        return ccc3(176, 140, 255);
+        return currentTheme().accent;
+    }
+
+    ccColor4F toColor4F(ccColor3B color, float alpha) {
+        return { static_cast<float>(color.r) / 255.f, static_cast<float>(color.g) / 255.f, static_cast<float>(color.b) / 255.f, alpha };
+    }
+
+    CCPoint hudPosition(char const* name, float defaultX, float defaultY) {
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        float fractionX = Mod::get()->getSavedValue<float>(fmt::format("layout-{}-x", name), defaultX);
+        float fractionY = Mod::get()->getSavedValue<float>(fmt::format("layout-{}-y", name), defaultY);
+        return { fractionX * winSize.width, fractionY * winSize.height };
     }
 
     ccColor3B shiftColor(int shiftTicks) {
@@ -1293,6 +1333,7 @@ finally {
         if (!sprite) {
             sprite = CCScale9Sprite::create("GJ_square01.png");
         }
+        sprite->setAnchorPoint({ 0.5f, 0.5f });
         sprite->setContentSize(size);
         sprite->setColor(color);
         sprite->setOpacity(opacity);
@@ -1302,19 +1343,110 @@ finally {
     void showShiftHud(PlayLayer* gameLayer, bool isDown, int shiftTicks);
     void showCombo(PlayLayer* gameLayer, int comboCount);
     void playComboSound(int comboCount);
+    void showMedal(PlayLayer* gameLayer, int streak);
+    void toggleMenu();
+
+    double nowSeconds() {
+        static auto const startTime = std::chrono::steady_clock::now();
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count();
+    }
+
+    struct TimelineEvent {
+        double time = 0.0;
+        int shift = 0;
+        bool isDown = true;
+    };
+
+    struct CorrectionRow {
+        int levelId = 0;
+        int attempt = 0;
+        double seconds = 0.0;
+        float positionX = 0.f;
+        bool isDown = true;
+        int shift = 0;
+    };
+
+    std::deque<TimelineEvent> g_timeline;
+    std::vector<CorrectionRow> g_corrections;
+    int g_attemptNumber = 1;
+    int g_menuTab = 0;
+
+    struct LevelRef {
+        bool valid = false;
+        int id = 0;
+        std::string name;
+        std::string prefix;
+    };
+
+    LevelRef currentLevelRef() {
+        LevelRef ref;
+        auto* playLayer = GameManager::get()->m_playLayer;
+        if (!playLayer || !playLayer->m_level) {
+            return ref;
+        }
+        ref.valid = true;
+        ref.id = static_cast<int>(playLayer->m_level->m_levelID.value());
+        ref.name = std::string(playLayer->m_level->m_levelName.c_str());
+        ref.prefix = fmt::format("lvl{}-", ref.id);
+        return ref;
+    }
+
+    int levelStat(LevelRef const& ref, char const* statName) {
+        return Mod::get()->getSavedValue<int>(ref.prefix + statName, 0);
+    }
+
+    void setLevelStat(LevelRef const& ref, char const* statName, int value) {
+        Mod::get()->setSavedValue<int>(ref.prefix + statName, value);
+    }
+
+    void addLevelStat(LevelRef const& ref, char const* statName, int delta) {
+        setLevelStat(ref, statName, levelStat(ref, statName) + delta);
+    }
+
+    std::string exportCorrectionsCsv() {
+        if (g_corrections.empty()) {
+            return "nothing to export yet";
+        }
+        auto path = Mod::get()->getSaveDir() / "corrections.csv";
+        std::ofstream file(path, std::ios::trunc);
+        if (!file) {
+            return "could not write the csv file";
+        }
+        file << "level_id,attempt,seconds,x_position,type,shift_ticks,shift_frames\n";
+        for (auto const& row : g_corrections) {
+            file << fmt::format("{},{},{:.3f},{:.1f},{},{},{:g}\n", row.levelId, row.attempt, row.seconds, row.positionX,
+                row.isDown ? "press" : "release", row.shift, row.shift * TICK_DURATION);
+        }
+        sayAlways("exported {} corrections to {}", g_corrections.size(), path.string());
+        return fmt::format("exported {} rows, path is in the terminal", g_corrections.size());
+    }
 
     constexpr char const* KEYBIND_MENU = "keybind-menu";
     constexpr char const* MENU_ID = "afterflow-menu";
 
-    constexpr std::array<std::pair<char const*, char const*>, 5> MENU_TOGGLES = { {
-        { "show-shift-hud", "tick shift readout" },
-        { "show-correction-markers", "correction markers" },
-        { "show-correction-replay", "correction replay" },
-        { "show-combo", "save counter" },
-        { "combo-sound", "counter sound" },
+    struct SettingToggle {
+        char const* id;
+        char const* label;
+        char const* description;
+    };
+
+    constexpr std::array<SettingToggle, 7> DISPLAY_TOGGLES = { {
+        { "show-shift-hud", "tick shift readout", "badge showing how far each save moved your click" },
+        { "show-correction-markers", "correction markers", "colored dots in the level where inputs were shifted" },
+        { "show-correction-replay", "correction replay", "red uncorrected path vs green corrected path after a save" },
+        { "show-ghost-race", "ghost race", "a ghost dot runs your uncorrected path next to you" },
+        { "show-timeline", "click timeline", "bottom strip: when you clicked vs when it landed" },
+        { "show-bias", "early / late readout", "your average click offset this attempt" },
+        { "danger-preview", "danger glow", "glow on the player when a click right now would die" },
     } };
 
-    constexpr std::array<char const*, 3> LOG_LEVEL_NAMES = { "quiet", "normal", "verbose" };
+    constexpr std::array<SettingToggle, 3> SAVE_TOGGLES = { {
+        { "show-combo", "save counter", "1x 2x 3x counter that counts saves each attempt" },
+        { "show-medals", "streak medals", "medal and screen pulse at 5, 10, 25 and 50 saves" },
+        { "combo-sound", "counter sound", "play a rising sound on every save" },
+    } };
+
+    constexpr std::array<char const*, 5> TAB_NAMES = { "display", "saves", "style", "stats", "log" };
 
     class AfterflowMenu : public CCLayerColor {
     public:
@@ -1328,43 +1460,160 @@ finally {
             return nullptr;
         }
 
-        bool ccTouchBegan(CCTouch*, CCEvent*) override {
+        bool ccTouchBegan(CCTouch* touch, CCEvent*) override {
+            m_dragChip = -1;
+            if (m_miniScreen && m_pages[2] && m_pages[2]->isVisible()) {
+                auto local = m_miniScreen->convertToNodeSpace(touch->getLocation());
+                for (int chipIndex = 0; chipIndex < 2; ++chipIndex) {
+                    if (m_chips[chipIndex] && m_chips[chipIndex]->boundingBox().containsPoint(local)) {
+                        m_dragChip = chipIndex;
+                        break;
+                    }
+                }
+            }
             return true;
         }
 
+        void ccTouchMoved(CCTouch* touch, CCEvent*) override {
+            if (m_dragChip < 0 || !m_miniScreen) {
+                return;
+            }
+            auto local = m_miniScreen->convertToNodeSpace(touch->getLocation());
+            auto size = m_miniScreen->getContentSize();
+            m_chips[m_dragChip]->setPosition({ std::clamp(local.x, 0.f, size.width), std::clamp(local.y, 0.f, size.height) });
+        }
+
+        void ccTouchEnded(CCTouch*, CCEvent*) override {
+            if (m_dragChip >= 0 && m_miniScreen) {
+                auto size = m_miniScreen->getContentSize();
+                auto position = m_chips[m_dragChip]->getPosition();
+                char const* layoutName = m_dragChip == 0 ? "readout" : "counter";
+                Mod::get()->setSavedValue<float>(fmt::format("layout-{}-x", layoutName), position.x / size.width);
+                Mod::get()->setSavedValue<float>(fmt::format("layout-{}-y", layoutName), position.y / size.height);
+            }
+            m_dragChip = -1;
+        }
+
+        void ccTouchCancelled(CCTouch* touch, CCEvent* event) override {
+            this->ccTouchEnded(touch, event);
+        }
+
     private:
-        struct ToggleRow {
+        struct ToggleRef {
+            char const* id = nullptr;
+            char const* description = nullptr;
             CCScale9Sprite* card = nullptr;
             CCLabelBMFont* label = nullptr;
         };
-        std::array<ToggleRow, 5> m_rows {};
-        std::array<CCScale9Sprite*, 3> m_segmentBackgrounds {};
-        std::array<CCLabelBMFont*, 3> m_segmentLabels {};
 
-        void styleRow(int rowIndex) {
-            bool isOn = Mod::get()->getSettingValue<bool>(MENU_TOGGLES[rowIndex].first);
-            auto& row = m_rows[rowIndex];
-            if (row.card) {
-                row.card->setColor(isOn ? ccc3(92, 56, 160) : ccc3(0, 0, 0));
-                row.card->setOpacity(isOn ? 215 : 120);
-            }
-            if (row.label) {
-                row.label->setColor(isOn ? ccc3(255, 255, 255) : ccc3(150, 150, 165));
+        struct SegmentGroup {
+            char const* settingId = nullptr;
+            std::vector<char const*> options;
+            std::vector<CCScale9Sprite*> backgrounds;
+            std::vector<CCLabelBMFont*> labels;
+        };
+
+        std::array<CCNode*, 5> m_pages {};
+        std::array<CCScale9Sprite*, 5> m_tabBackgrounds {};
+        std::array<CCLabelBMFont*, 5> m_tabLabels {};
+        std::vector<ToggleRef> m_toggles;
+        std::array<SegmentGroup, 3> m_groups {};
+        CCLabelBMFont* m_hintLabel = nullptr;
+        CCLabelBMFont* m_volumeLabel = nullptr;
+        CCLabelBMFont* m_statsTitle = nullptr;
+        std::array<CCLabelBMFont*, 5> m_statLines {};
+        CCNode* m_miniScreen = nullptr;
+        std::array<CCNode*, 2> m_chips {};
+        int m_dragChip = -1;
+
+        void setHint(std::string const& text) {
+            if (m_hintLabel) {
+                m_hintLabel->setString(text.c_str());
             }
         }
 
-        void styleSegments() {
-            auto currentLevel = Mod::get()->getSettingValue<std::string>("log-level");
-            for (size_t index = 0; index < LOG_LEVEL_NAMES.size(); ++index) {
-                bool isActive = currentLevel == LOG_LEVEL_NAMES[index];
-                if (m_segmentBackgrounds[index]) {
-                    m_segmentBackgrounds[index]->setColor(isActive ? ccc3(124, 84, 224) : ccc3(0, 0, 0));
-                    m_segmentBackgrounds[index]->setOpacity(isActive ? 240 : 120);
-                }
-                if (m_segmentLabels[index]) {
-                    m_segmentLabels[index]->setColor(isActive ? ccc3(255, 255, 255) : ccc3(150, 150, 165));
-                }
+        void styleRow(int rowIndex) {
+            auto const& row = m_toggles[rowIndex];
+            bool isOn = Mod::get()->getSettingValue<bool>(row.id);
+            auto theme = currentTheme();
+            row.card->setColor(isOn ? theme.cardOn : ccc3(0, 0, 0));
+            row.card->setOpacity(isOn ? 215 : 120);
+            row.label->setColor(isOn ? ccc3(255, 255, 255) : ccc3(150, 150, 165));
+        }
+
+        void styleGroup(int groupIndex) {
+            auto& group = m_groups[groupIndex];
+            auto currentValue = Mod::get()->getSettingValue<std::string>(group.settingId);
+            auto theme = currentTheme();
+            for (size_t optionIndex = 0; optionIndex < group.options.size(); ++optionIndex) {
+                bool isActive = currentValue == group.options[optionIndex];
+                group.backgrounds[optionIndex]->setColor(isActive ? theme.segmentOn : ccc3(0, 0, 0));
+                group.backgrounds[optionIndex]->setOpacity(isActive ? 240 : 120);
+                group.labels[optionIndex]->setColor(isActive ? ccc3(255, 255, 255) : ccc3(150, 150, 165));
             }
+        }
+
+        void showTab(int tabIndex) {
+            g_menuTab = tabIndex;
+            auto theme = currentTheme();
+            for (int index = 0; index < 5; ++index) {
+                bool isActive = index == tabIndex;
+                if (m_pages[index]) {
+                    m_pages[index]->setVisible(isActive);
+                }
+                m_tabBackgrounds[index]->setColor(isActive ? theme.segmentOn : ccc3(0, 0, 0));
+                m_tabBackgrounds[index]->setOpacity(isActive ? 240 : 120);
+                m_tabLabels[index]->setColor(isActive ? ccc3(255, 255, 255) : ccc3(150, 150, 165));
+            }
+            if (tabIndex == 3) {
+                refreshStats();
+            }
+            setHint("tap a row for details");
+        }
+
+        void refreshStats() {
+            if (!m_statsTitle) {
+                return;
+            }
+            auto ref = currentLevelRef();
+            if (!ref.valid) {
+                m_statsTitle->setString("enter a level to see its stats");
+                for (auto* line : m_statLines) {
+                    line->setString("");
+                }
+                return;
+            }
+            int attempts = levelStat(ref, "attempts");
+            int inputs = levelStat(ref, "inputs");
+            int clean = levelStat(ref, "clean");
+            int saves = levelStat(ref, "saves");
+            int shiftSum = levelStat(ref, "shiftsum");
+            int bestStreak = levelStat(ref, "best");
+            float accuracy = inputs > 0 ? 100.f * static_cast<float>(clean) / static_cast<float>(inputs) : 0.f;
+            float averageShift = saves > 0 ? static_cast<float>(shiftSum) / static_cast<float>(saves) : 0.f;
+
+            m_statsTitle->setString(ref.name.c_str());
+            std::array<std::string, 5> lines = {
+                fmt::format("attempts tracked: {}", attempts),
+                fmt::format("saves: {}   best streak: {}", saves, bestStreak),
+                fmt::format("clean clicks: {:.0f}%  ({} of {})", accuracy, clean, inputs),
+                fmt::format("you click about {:.1f} ticks early on average", averageShift),
+                fmt::format("this attempt: {} saves, {} missed", state.attemptCorrections, state.attemptMisses),
+            };
+            for (size_t index = 0; index < lines.size(); ++index) {
+                m_statLines[index]->setString(lines[index].c_str());
+            }
+        }
+
+        CCMenuItemSpriteExtra* makeSmallButton(char const* text, float width, float height, float labelScale, SEL_MenuHandler handler, int tag) {
+            auto* background = makeScale9("square02_001.png", { width, height }, currentTheme().segmentOn, 235);
+            auto* label = CCLabelBMFont::create(text, "bigFont.fnt");
+            label->setScale(labelScale);
+            label->setPosition({ width / 2.f, height / 2.f });
+            background->addChild(label);
+            auto* button = CCMenuItemSpriteExtra::create(background, this, handler);
+            button->setTag(tag);
+            return button;
         }
 
         bool build() {
@@ -1376,138 +1625,339 @@ finally {
             this->runAction(CCFadeTo::create(0.18f, 180));
 
             auto winSize = CCDirector::sharedDirector()->getWinSize();
+            auto theme = currentTheme();
+
             auto* root = CCNode::create();
             root->setPosition({ winSize.width / 2.f, winSize.height / 2.f });
             root->setScale(0.85f);
             root->runAction(CCEaseBackOut::create(CCScaleTo::create(0.22f, 1.f)));
             this->addChild(root);
 
-            auto accent = accentColor();
-
-            // panel: purple frame around a dark body
-            root->addChild(makeScale9("GJ_square01.png", { 332.f, 298.f }, ccc3(126, 92, 230), 255), 0);
-            root->addChild(makeScale9("square02_001.png", { 322.f, 288.f }, ccc3(8, 8, 16), 232), 0);
+            root->addChild(makeScale9("GJ_square01.png", { 332.f, 300.f }, theme.frame, 255), 0);
+            root->addChild(makeScale9("square02_001.png", { 322.f, 290.f }, ccc3(8, 8, 16), 232), 0);
 
             auto* title = CCLabelBMFont::create("AFTERFLOW", "goldFont.fnt");
-            title->setScale(0.8f);
-            title->setPosition({ 0.f, 122.f });
+            title->setScale(0.7f);
+            title->setPosition({ 0.f, 129.f });
             root->addChild(title, 2);
 
-            auto* subtitle = CCLabelBMFont::create("predictive input buffer", "chatFont.fnt");
-            subtitle->setScale(0.55f);
-            subtitle->setColor(ccc3(160, 150, 190));
-            subtitle->setPosition({ 0.f, 104.f });
-            root->addChild(subtitle, 2);
-
-            auto* divider = CCLayerColor::create(ccc4(176, 140, 255, 70), 290.f, 1.f);
-            divider->setPosition({ -145.f, 94.f });
+            auto* divider = CCLayerColor::create(ccc4(theme.accent.r, theme.accent.g, theme.accent.b, 70), 290.f, 1.f);
+            divider->setPosition({ -145.f, 95.f });
             root->addChild(divider, 1);
 
-            auto* menu = CCMenu::create();
-            menu->setPosition({ 0.f, 0.f });
-            menu->setTouchPriority(-510);
-            root->addChild(menu, 5);
+            auto* rootMenu = CCMenu::create();
+            rootMenu->setPosition({ 0.f, 0.f });
+            rootMenu->setTouchPriority(-510);
+            root->addChild(rootMenu, 6);
 
-            auto addHeader = [&](char const* text, float y) {
+            // tabs
+            for (int tabIndex = 0; tabIndex < 5; ++tabIndex) {
+                auto* background = makeScale9("square02_001.png", { 60.f, 18.f }, ccc3(0, 0, 0), 120);
+                auto* label = CCLabelBMFont::create(TAB_NAMES[tabIndex], "bigFont.fnt");
+                label->setScale(0.28f);
+                label->setPosition({ 30.f, 9.f });
+                background->addChild(label);
+                auto* tab = CCMenuItemSpriteExtra::create(background, this, menu_selector(AfterflowMenu::onTab));
+                tab->setTag(tabIndex);
+                tab->setPosition({ (static_cast<float>(tabIndex) - 2.f) * 64.f, 108.f });
+                rootMenu->addChild(tab);
+                m_tabBackgrounds[tabIndex] = background;
+                m_tabLabels[tabIndex] = label;
+            }
+
+            // pages
+            std::array<CCMenu*, 5> pageMenus {};
+            for (int pageIndex = 0; pageIndex < 5; ++pageIndex) {
+                m_pages[pageIndex] = CCNode::create();
+                root->addChild(m_pages[pageIndex], 2);
+                pageMenus[pageIndex] = CCMenu::create();
+                pageMenus[pageIndex]->setPosition({ 0.f, 0.f });
+                pageMenus[pageIndex]->setTouchPriority(-510);
+                m_pages[pageIndex]->addChild(pageMenus[pageIndex], 5);
+            }
+
+            auto addHeader = [&](int pageIndex, char const* text, float y) {
                 auto* header = CCLabelBMFont::create(text, "bigFont.fnt");
-                header->setScale(0.3f);
-                header->setColor(accent);
+                header->setScale(0.28f);
+                header->setColor(theme.accent);
                 header->setAnchorPoint({ 0.f, 0.5f });
                 header->setPosition({ -145.f, y });
-                root->addChild(header, 2);
+                m_pages[pageIndex]->addChild(header, 2);
             };
-            addHeader("DISPLAY", 80.f);
-            addHeader("SAVE COUNTER", -12.f);
-            addHeader("TERMINAL LOG", -80.f);
 
-            constexpr std::array<float, 5> rowPositions = { 58.f, 33.f, 8.f, -34.f, -59.f };
-            for (int rowIndex = 0; rowIndex < static_cast<int>(MENU_TOGGLES.size()); ++rowIndex) {
-                float rowY = rowPositions[rowIndex];
-                auto* card = makeScale9("square02_001.png", { 290.f, 22.f }, ccc3(0, 0, 0), 120);
-                card->setPosition({ 0.f, rowY });
-                root->addChild(card, 1);
+            auto addToggleRow = [&](int pageIndex, SettingToggle const& toggle, float y) {
+                int toggleIndex = static_cast<int>(m_toggles.size());
+                auto* page = m_pages[pageIndex];
+                auto* menu = pageMenus[pageIndex];
 
-                auto* label = CCLabelBMFont::create(MENU_TOGGLES[rowIndex].second, "bigFont.fnt");
-                label->setScale(0.4f);
+                auto* card = makeScale9("square02_001.png", { 290.f, 20.f }, ccc3(0, 0, 0), 120);
+                card->setPosition({ 0.f, y });
+                page->addChild(card, 1);
+
+                auto* label = CCLabelBMFont::create(toggle.label, "bigFont.fnt");
+                label->setScale(0.36f);
                 label->setAnchorPoint({ 0.f, 0.5f });
-                label->setPosition({ -135.f, rowY });
-                root->addChild(label, 2);
+                label->setPosition({ -135.f, y });
+                page->addChild(label, 2);
 
-                auto* toggler = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(AfterflowMenu::onToggle), 0.55f);
-                toggler->setTag(rowIndex);
-                toggler->toggle(Mod::get()->getSettingValue<bool>(MENU_TOGGLES[rowIndex].first));
-                toggler->setPosition({ 122.f, rowY });
+                auto* tapZone = makeScale9("square02_001.png", { 240.f, 20.f }, ccc3(0, 0, 0), 0);
+                auto* tapItem = CCMenuItemSpriteExtra::create(tapZone, this, menu_selector(AfterflowMenu::onRowTap));
+                tapItem->setTag(toggleIndex);
+                tapItem->setPosition({ -22.f, y });
+                menu->addChild(tapItem);
+
+                auto* toggler = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(AfterflowMenu::onToggle), 0.5f);
+                toggler->setTag(toggleIndex);
+                toggler->toggle(Mod::get()->getSettingValue<bool>(toggle.id));
+                toggler->setPosition({ 122.f, y });
                 menu->addChild(toggler);
 
-                m_rows[rowIndex].card = card;
-                m_rows[rowIndex].label = label;
-                styleRow(rowIndex);
+                ToggleRef ref;
+                ref.id = toggle.id;
+                ref.description = toggle.description;
+                ref.card = card;
+                ref.label = label;
+                m_toggles.push_back(ref);
+                styleRow(toggleIndex);
+            };
+
+            auto addSegmentGroup = [&](int groupIndex, int pageIndex, char const* settingId, std::vector<char const*> options, float y, float segmentWidth, float spacing) {
+                auto& group = m_groups[groupIndex];
+                group.settingId = settingId;
+                group.options = options;
+                float startX = -(static_cast<float>(options.size()) - 1.f) * spacing / 2.f;
+                for (size_t optionIndex = 0; optionIndex < options.size(); ++optionIndex) {
+                    auto* background = makeScale9("square02_001.png", { segmentWidth, 20.f }, ccc3(0, 0, 0), 120);
+                    auto* label = CCLabelBMFont::create(options[optionIndex], "bigFont.fnt");
+                    label->setScale(0.3f);
+                    label->setPosition({ segmentWidth / 2.f, 10.f });
+                    background->addChild(label);
+                    auto* segment = CCMenuItemSpriteExtra::create(background, this, menu_selector(AfterflowMenu::onSegment));
+                    segment->setTag(groupIndex * 10 + static_cast<int>(optionIndex));
+                    segment->setPosition({ startX + static_cast<float>(optionIndex) * spacing, y });
+                    pageMenus[pageIndex]->addChild(segment);
+                    group.backgrounds.push_back(background);
+                    group.labels.push_back(label);
+                }
+                styleGroup(groupIndex);
+            };
+
+            auto addNote = [&](int pageIndex, char const* text, float y) {
+                auto* note = CCLabelBMFont::create(text, "chatFont.fnt");
+                note->setScale(0.55f);
+                note->setColor(ccc3(150, 150, 170));
+                note->setAnchorPoint({ 0.f, 0.5f });
+                note->setPosition({ -145.f, y });
+                m_pages[pageIndex]->addChild(note, 2);
+            };
+
+            // page 0: display
+            for (size_t index = 0; index < DISPLAY_TOGGLES.size(); ++index) {
+                addToggleRow(0, DISPLAY_TOGGLES[index], 72.f - 24.f * static_cast<float>(index));
             }
 
-            for (int segmentIndex = 0; segmentIndex < static_cast<int>(LOG_LEVEL_NAMES.size()); ++segmentIndex) {
-                auto* background = makeScale9("square02_001.png", { 88.f, 22.f }, ccc3(0, 0, 0), 120);
-                auto* label = CCLabelBMFont::create(LOG_LEVEL_NAMES[segmentIndex], "bigFont.fnt");
-                label->setScale(0.36f);
-                label->setPosition({ 44.f, 11.f });
-                background->addChild(label);
-
-                auto* segment = CCMenuItemSpriteExtra::create(background, this, menu_selector(AfterflowMenu::onSegment));
-                segment->setTag(segmentIndex);
-                segment->setPosition({ (static_cast<float>(segmentIndex) - 1.f) * 94.f, -101.f });
-                menu->addChild(segment);
-
-                m_segmentBackgrounds[segmentIndex] = background;
-                m_segmentLabels[segmentIndex] = label;
+            // page 1: saves + sound
+            for (size_t index = 0; index < SAVE_TOGGLES.size(); ++index) {
+                addToggleRow(1, SAVE_TOGGLES[index], 72.f - 24.f * static_cast<float>(index));
             }
-            styleSegments();
+            addHeader(1, "SOUND PACK", -6.f);
+            addSegmentGroup(1, 1, "combo-sound-pack", { "tick", "click", "coin", "chest", "score" }, -27.f, 54.f, 57.f);
+            addHeader(1, "VOLUME", -52.f);
+            {
+                auto* card = makeScale9("square02_001.png", { 290.f, 20.f }, ccc3(0, 0, 0), 120);
+                card->setPosition({ 0.f, -74.f });
+                m_pages[1]->addChild(card, 1);
+                auto volumeText = fmt::format("{:.0f}%", Mod::get()->getSettingValue<double>("combo-volume") * 100.0);
+                m_volumeLabel = CCLabelBMFont::create(volumeText.c_str(), "bigFont.fnt");
+                m_volumeLabel->setScale(0.4f);
+                m_volumeLabel->setPosition({ 0.f, -74.f });
+                m_pages[1]->addChild(m_volumeLabel, 2);
+                auto* minusButton = makeSmallButton("-", 30.f, 18.f, 0.5f, menu_selector(AfterflowMenu::onVolume), 0);
+                minusButton->setPosition({ -60.f, -74.f });
+                pageMenus[1]->addChild(minusButton);
+                auto* plusButton = makeSmallButton("+", 30.f, 18.f, 0.5f, menu_selector(AfterflowMenu::onVolume), 1);
+                plusButton->setPosition({ 60.f, -74.f });
+                pageMenus[1]->addChild(plusButton);
+            }
 
-            auto* previewSprite = ButtonSprite::create("preview");
-            previewSprite->setScale(0.6f);
-            auto* previewButton = CCMenuItemSpriteExtra::create(previewSprite, this, menu_selector(AfterflowMenu::onPreview));
-            previewButton->setPosition({ -62.f, -126.f });
-            menu->addChild(previewButton);
+            // page 2: style (theme + layout)
+            addHeader(2, "THEME", 80.f);
+            addSegmentGroup(2, 2, "theme", { "purple", "cyan", "orange", "green", "pink" }, 60.f, 54.f, 57.f);
+            addHeader(2, "HUD LAYOUT  (drag the chips)", 36.f);
+            {
+                m_miniScreen = CCNode::create();
+                m_miniScreen->setContentSize({ 180.f, 101.f });
+                m_miniScreen->setPosition({ -120.f, -80.f });
+                m_pages[2]->addChild(m_miniScreen, 2);
 
-            auto* closeSprite = ButtonSprite::create("close");
-            closeSprite->setScale(0.6f);
-            auto* closeButton = CCMenuItemSpriteExtra::create(closeSprite, this, menu_selector(AfterflowMenu::onClose));
-            closeButton->setPosition({ 62.f, -126.f });
-            menu->addChild(closeButton);
+                auto* screenBackground = makeScale9("square02_001.png", { 180.f, 101.f }, ccc3(28, 28, 44), 255);
+                screenBackground->setPosition({ 90.f, 50.5f });
+                m_miniScreen->addChild(screenBackground, 0);
 
-            auto hintText = fmt::format("press {} to close", keybindList(KEYBIND_MENU));
-            auto* hint = CCLabelBMFont::create(hintText.c_str(), "chatFont.fnt");
-            hint->setScale(0.5f);
-            hint->setColor(ccc3(130, 125, 150));
-            hint->setPosition({ 0.f, -141.f });
-            root->addChild(hint, 2);
+                char const* chipNames[2] = { "readout", "counter" };
+                float defaultX[2] = { 0.5f, 0.109f };
+                float defaultY[2] = { 0.875f, 0.725f };
+                for (int chipIndex = 0; chipIndex < 2; ++chipIndex) {
+                    auto* chip = makeScale9("square02_001.png", { 46.f, 14.f }, theme.segmentOn, 240);
+                    auto* chipLabel = CCLabelBMFont::create(chipNames[chipIndex], "bigFont.fnt");
+                    chipLabel->setScale(0.24f);
+                    chipLabel->setPosition({ 23.f, 7.f });
+                    chip->addChild(chipLabel);
+                    float fractionX = Mod::get()->getSavedValue<float>(fmt::format("layout-{}-x", chipNames[chipIndex]), defaultX[chipIndex]);
+                    float fractionY = Mod::get()->getSavedValue<float>(fmt::format("layout-{}-y", chipNames[chipIndex]), defaultY[chipIndex]);
+                    chip->setPosition({ fractionX * 180.f, fractionY * 101.f });
+                    m_miniScreen->addChild(chip, 3);
+                    m_chips[chipIndex] = chip;
+                }
+                auto* resetButton = makeSmallButton("reset", 54.f, 20.f, 0.34f, menu_selector(AfterflowMenu::onResetLayout), 0);
+                resetButton->setPosition({ 112.f, -30.f });
+                pageMenus[2]->addChild(resetButton);
+            }
+
+            // page 3: stats
+            m_statsTitle = CCLabelBMFont::create("", "goldFont.fnt");
+            m_statsTitle->setScale(0.5f);
+            m_statsTitle->setPosition({ 0.f, 76.f });
+            m_pages[3]->addChild(m_statsTitle, 2);
+            for (int lineIndex = 0; lineIndex < 5; ++lineIndex) {
+                auto* line = CCLabelBMFont::create("", "chatFont.fnt");
+                line->setScale(0.7f);
+                line->setAnchorPoint({ 0.f, 0.5f });
+                line->setPosition({ -135.f, 48.f - 24.f * static_cast<float>(lineIndex) });
+                m_pages[3]->addChild(line, 2);
+                m_statLines[lineIndex] = line;
+            }
+            {
+                auto* clearButton = makeSmallButton("clear level stats", 120.f, 20.f, 0.3f, menu_selector(AfterflowMenu::onClearStats), 0);
+                clearButton->setPosition({ 0.f, -82.f });
+                pageMenus[3]->addChild(clearButton);
+            }
+
+            // page 4: log
+            addHeader(4, "TERMINAL LOG LEVEL", 78.f);
+            addSegmentGroup(0, 4, "log-level", { "quiet", "normal", "verbose" }, 56.f, 88.f, 94.f);
+            addNote(4, "quiet: attempt summary and errors only", 26.f);
+            addNote(4, "normal: every save", 10.f);
+            addNote(4, "verbose: also the detailed prediction traces", -6.f);
+            addHeader(4, "EXPORT", -30.f);
+            {
+                auto* exportButton = makeSmallButton("export corrections csv", 170.f, 20.f, 0.3f, menu_selector(AfterflowMenu::onExport), 0);
+                exportButton->setPosition({ 0.f, -52.f });
+                pageMenus[4]->addChild(exportButton);
+            }
+
+            // footer
+            auto* previewButton = makeSmallButton("preview", 80.f, 20.f, 0.34f, menu_selector(AfterflowMenu::onPreview), 0);
+            previewButton->setPosition({ -62.f, -125.f });
+            rootMenu->addChild(previewButton);
+            auto* closeButton = makeSmallButton("close", 80.f, 20.f, 0.34f, menu_selector(AfterflowMenu::onClose), 0);
+            closeButton->setPosition({ 62.f, -125.f });
+            rootMenu->addChild(closeButton);
+
+            m_hintLabel = CCLabelBMFont::create("", "chatFont.fnt");
+            m_hintLabel->setScale(0.5f);
+            m_hintLabel->setColor(ccc3(130, 125, 150));
+            m_hintLabel->setPosition({ 0.f, -142.f });
+            root->addChild(m_hintLabel, 2);
+
+            showTab(std::clamp(g_menuTab, 0, 4));
             return true;
+        }
+
+        void onTab(CCObject* sender) {
+            showTab(static_cast<CCNode*>(sender)->getTag());
+        }
+
+        void onRowTap(CCObject* sender) {
+            int index = static_cast<CCNode*>(sender)->getTag();
+            if (index >= 0 && index < static_cast<int>(m_toggles.size())) {
+                setHint(m_toggles[index].description);
+            }
         }
 
         void onToggle(CCObject* sender) {
             int index = static_cast<CCNode*>(sender)->getTag();
-            if (index < 0 || index >= static_cast<int>(MENU_TOGGLES.size())) {
+            if (index < 0 || index >= static_cast<int>(m_toggles.size())) {
                 return;
             }
-            auto* settingId = MENU_TOGGLES[index].first;
+            auto* settingId = m_toggles[index].id;
             Mod::get()->setSettingValue<bool>(settingId, !Mod::get()->getSettingValue<bool>(settingId));
             styleRow(index);
         }
 
         void onSegment(CCObject* sender) {
-            int index = static_cast<CCNode*>(sender)->getTag();
-            if (index < 0 || index >= static_cast<int>(LOG_LEVEL_NAMES.size())) {
+            int tag = static_cast<CCNode*>(sender)->getTag();
+            int groupIndex = tag / 10;
+            int optionIndex = tag % 10;
+            if (groupIndex < 0 || groupIndex >= 3) {
                 return;
             }
-            Mod::get()->setSettingValue<std::string>("log-level", LOG_LEVEL_NAMES[index]);
-            styleSegments();
+            auto& group = m_groups[groupIndex];
+            if (optionIndex < 0 || optionIndex >= static_cast<int>(group.options.size())) {
+                return;
+            }
+            Mod::get()->setSettingValue<std::string>(group.settingId, group.options[optionIndex]);
+            styleGroup(groupIndex);
+            if (groupIndex == 2) {
+                Loader::get()->queueInMainThread([] {
+                    toggleMenu();
+                    toggleMenu();
+                });
+            }
+        }
+
+        void onVolume(CCObject* sender) {
+            int direction = static_cast<CCNode*>(sender)->getTag() == 0 ? -1 : 1;
+            double volume = Mod::get()->getSettingValue<double>("combo-volume") + 0.1 * direction;
+            volume = std::clamp(std::round(volume * 10.0) / 10.0, 0.0, 1.0);
+            Mod::get()->setSettingValue<double>("combo-volume", volume);
+            if (m_volumeLabel) {
+                auto volumeText = fmt::format("{:.0f}%", volume * 100.0);
+                m_volumeLabel->setString(volumeText.c_str());
+            }
+            FMODAudioEngine::sharedEngine()->playEffect("counter003.ogg", 1.f, 0.f, static_cast<float>(volume));
+        }
+
+        void onResetLayout(CCObject*) {
+            float defaultX[2] = { 0.5f, 0.109f };
+            float defaultY[2] = { 0.875f, 0.725f };
+            char const* chipNames[2] = { "readout", "counter" };
+            for (int chipIndex = 0; chipIndex < 2; ++chipIndex) {
+                Mod::get()->setSavedValue<float>(fmt::format("layout-{}-x", chipNames[chipIndex]), defaultX[chipIndex]);
+                Mod::get()->setSavedValue<float>(fmt::format("layout-{}-y", chipNames[chipIndex]), defaultY[chipIndex]);
+                if (m_chips[chipIndex]) {
+                    m_chips[chipIndex]->setPosition({ defaultX[chipIndex] * 180.f, defaultY[chipIndex] * 101.f });
+                }
+            }
+            setHint("layout reset");
+        }
+
+        void onClearStats(CCObject*) {
+            auto ref = currentLevelRef();
+            if (!ref.valid) {
+                setHint("enter a level first");
+                return;
+            }
+            for (auto* statName : { "attempts", "inputs", "clean", "saves", "shiftsum", "best" }) {
+                setLevelStat(ref, statName, 0);
+            }
+            refreshStats();
+            setHint("level stats cleared");
+        }
+
+        void onExport(CCObject*) {
+            setHint(exportCorrectionsCsv());
         }
 
         void onPreview(CCObject*) {
             auto* playLayer = GameManager::get()->m_playLayer;
             if (!playLayer) {
+                setHint("preview works while you are inside a level");
                 return;
             }
             showShiftHud(playLayer, true, 7);
             showCombo(playLayer, 6);
+            showMedal(playLayer, 10);
             playComboSound(6);
         }
 
@@ -3195,7 +3645,7 @@ finally {
         auto* root = CCNode::create();
         root->setID("afterflow-shift-hud");
         auto winSize = CCDirector::sharedDirector()->getWinSize();
-        root->setPosition({ winSize.width / 2.f, winSize.height - 40.f });
+        root->setPosition(hudPosition("readout", 0.5f, 0.875f));
         root->addChild(border, 0);
         root->addChild(body, 1);
         root->addChild(mainLabel, 2);
@@ -3214,8 +3664,15 @@ finally {
         if (!Mod::get()->getSettingValue<bool>("combo-sound")) {
             return;
         }
+        auto pack = Mod::get()->getSettingValue<std::string>("combo-sound-pack");
+        char const* soundFile = pack == "click"  ? "playSound_01.ogg"
+                              : pack == "coin"   ? "buyItem01.ogg"
+                              : pack == "chest"  ? "chestClick.ogg"
+                              : pack == "score"  ? "highscoreGet02.ogg"
+                                                 : "counter003.ogg";
+        float volume = static_cast<float>(Mod::get()->getSettingValue<double>("combo-volume"));
         float pitch = std::min(1.f + 0.06f * static_cast<float>(comboCount - 1), 2.f);
-        FMODAudioEngine::sharedEngine()->playEffect("counter003.ogg", pitch, 0.f, 0.6f);
+        FMODAudioEngine::sharedEngine()->playEffect(soundFile, pitch, 0.f, volume);
     }
 
     void showCombo(PlayLayer* gameLayer, int comboCount) {
@@ -3252,7 +3709,7 @@ finally {
         auto* root = CCNode::create();
         root->setID("afterflow-combo");
         auto winSize = CCDirector::sharedDirector()->getWinSize();
-        root->setPosition({ 62.f, winSize.height - 88.f });
+        root->setPosition(hudPosition("counter", 0.109f, 0.725f));
         root->addChild(numberLabel);
         root->addChild(captionLabel);
 
@@ -3266,20 +3723,228 @@ finally {
         uiLayer->addChild(root, 100);
     }
 
-    void printAttemptSummary() {
-        if (state.attemptCorrections == 0 && state.attemptMisses == 0) {
+    void showMedal(PlayLayer* gameLayer, int streak) {
+        if (!gameLayer || !gameLayer->m_uiLayer) {
             return;
         }
-        if (state.attemptCorrections > 0) {
-            sayAlways("attempt: {} corrected, avg +{:.1f}t, max +{}t, {} missed", state.attemptCorrections,
-                static_cast<double>(state.attemptShiftSum) / state.attemptCorrections, state.attemptShiftMax, state.attemptMisses);
+        if (!Mod::get()->getSettingValue<bool>("show-medals")) {
+            return;
+        }
+        ccColor3B tint;
+        if (streak == 5) {
+            tint = ccc3(205, 127, 50);
+        } else if (streak == 10) {
+            tint = ccc3(205, 205, 225);
+        } else if (streak == 25) {
+            tint = ccc3(255, 205, 50);
+        } else if (streak == 50) {
+            tint = ccc3(175, 125, 255);
         } else {
-            sayAlways("attempt: 0 corrected, {} missed", state.attemptMisses);
+            return;
+        }
+        auto* uiLayer = gameLayer->m_uiLayer;
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        if (auto* oldMedal = uiLayer->getChildByID("afterflow-medal")) {
+            oldMedal->removeFromParent();
+        }
+
+        auto* medalDraw = CCDrawNode::create();
+        medalDraw->drawDot({ 0.f, 0.f }, 21.f, toColor4F(tint, 0.25f));
+        medalDraw->drawDot({ 0.f, 0.f }, 16.f, toColor4F(tint, 1.f));
+        medalDraw->drawDot({ 0.f, 0.f }, 11.f, toColor4F(ccc3(tint.r / 2, tint.g / 2, tint.b / 2), 1.f));
+
+        auto streakText = fmt::format("{}", streak);
+        auto* numberLabel = CCLabelBMFont::create(streakText.c_str(), "bigFont.fnt");
+        numberLabel->setScale(0.45f);
+        auto* captionLabel = CCLabelBMFont::create("STREAK", "bigFont.fnt");
+        captionLabel->setScale(0.26f);
+        captionLabel->setColor(tint);
+        captionLabel->setPosition({ 0.f, -27.f });
+
+        auto* root = CCNode::create();
+        root->setID("afterflow-medal");
+        root->setPosition(hudPosition("readout", 0.5f, 0.875f) + CCPoint { 0.f, -64.f });
+        root->addChild(medalDraw);
+        root->addChild(numberLabel);
+        root->addChild(captionLabel);
+        root->setScale(0.2f);
+        root->runAction(CCSequence::create(
+            CCEaseBackOut::create(CCScaleTo::create(0.25f, 1.f)),
+            CCDelayTime::create(1.8f),
+            CCScaleTo::create(0.2f, 0.f),
+            CallFuncExt::create([root] { root->removeFromParent(); }),
+            nullptr
+        ));
+        uiLayer->addChild(root, 100);
+
+        // screen edge pulse
+        float thickness = 6.f;
+        struct EdgeStrip {
+            CCPoint position;
+            CCSize size;
+        };
+        EdgeStrip strips[4] = {
+            { { 0.f, winSize.height - thickness }, { winSize.width, thickness } },
+            { { 0.f, 0.f }, { winSize.width, thickness } },
+            { { 0.f, 0.f }, { thickness, winSize.height } },
+            { { winSize.width - thickness, 0.f }, { thickness, winSize.height } },
+        };
+        for (auto const& edge : strips) {
+            auto* strip = CCLayerColor::create(ccc4(tint.r, tint.g, tint.b, 170), edge.size.width, edge.size.height);
+            strip->setPosition(edge.position);
+            strip->runAction(CCSequence::create(CCFadeOut::create(0.6f), CallFuncExt::create([strip] { strip->removeFromParent(); }), nullptr));
+            uiLayer->addChild(strip, 90);
+        }
+    }
+
+    void updateBiasLabel(PlayLayer* gameLayer) {
+        if (!gameLayer || !gameLayer->m_uiLayer) {
+            return;
+        }
+        auto* uiLayer = gameLayer->m_uiLayer;
+        auto* existing = static_cast<CCLabelBMFont*>(uiLayer->getChildByID("afterflow-bias"));
+        if (!Mod::get()->getSettingValue<bool>("show-bias") || state.attemptCorrections == 0) {
+            if (existing) {
+                existing->removeFromParent();
+            }
+            return;
+        }
+        float average = static_cast<float>(state.attemptShiftSum) / static_cast<float>(state.attemptCorrections);
+        auto text = fmt::format("you click about {:.1f}t early", average);
+        if (!existing) {
+            existing = CCLabelBMFont::create(text.c_str(), "chatFont.fnt");
+            existing->setID("afterflow-bias");
+            existing->setScale(0.7f);
+            existing->setColor(ccc3(200, 200, 220));
+            existing->setAnchorPoint({ 0.f, 0.5f });
+            existing->setPosition({ 12.f, 14.f });
+            uiLayer->addChild(existing, 100);
+        } else {
+            existing->setString(text.c_str());
+        }
+    }
+
+    void drawTimeline(CCDrawNode* node) {
+        constexpr float stripWidth = 220.f;
+        constexpr double windowSeconds = 4.0;
+        node->clear();
+        node->drawSegment({ 0.f, 0.f }, { stripWidth, 0.f }, 7.f, ccColor4F { 0.f, 0.f, 0.f, 0.4f });
+        double now = nowSeconds();
+        while (!g_timeline.empty() && now - g_timeline.front().time > windowSeconds + 0.5) {
+            g_timeline.pop_front();
+        }
+        for (auto const& event : g_timeline) {
+            double age = now - event.time;
+            if (age > windowSeconds) {
+                continue;
+            }
+            float x = stripWidth - static_cast<float>(age / windowSeconds) * stripWidth;
+            float direction = event.isDown ? 1.f : -1.f;
+            node->drawSegment({ x, 0.f }, { x, 5.f * direction }, 0.9f, ccColor4F { 1.f, 1.f, 1.f, 0.9f });
+            if (event.shift > 0) {
+                float landedX = x + static_cast<float>(event.shift) / 240.f / static_cast<float>(windowSeconds) * stripWidth;
+                auto color = toColor4F(shiftColor(event.shift), 0.95f);
+                node->drawSegment({ x, 0.f }, { landedX, 0.f }, 1.1f, color);
+                node->drawSegment({ landedX, 0.f }, { landedX, 5.f * direction }, 0.9f, color);
+            }
+        }
+        node->drawDot({ stripWidth, 0.f }, 2.2f, toColor4F(accentColor(), 0.9f));
+    }
+
+    void recordTimelineEvent(PlayLayer* gameLayer, bool isDown, int shiftTicks, float positionX) {
+        if (!gameLayer || !gameLayer->m_uiLayer) {
+            return;
+        }
+        TimelineEvent event;
+        event.time = nowSeconds();
+        event.shift = shiftTicks;
+        event.isDown = isDown;
+        g_timeline.push_back(event);
+        if (g_timeline.size() > 400) {
+            g_timeline.pop_front();
+        }
+
+        if (shiftTicks > 0) {
+            CorrectionRow row;
+            auto ref = currentLevelRef();
+            row.levelId = ref.valid ? ref.id : 0;
+            row.attempt = g_attemptNumber;
+            row.seconds = event.time;
+            row.positionX = positionX;
+            row.isDown = isDown;
+            row.shift = shiftTicks;
+            g_corrections.push_back(row);
+            if (g_corrections.size() > 20000) {
+                g_corrections.erase(g_corrections.begin(), g_corrections.begin() + 5000);
+            }
+        }
+
+        auto* uiLayer = gameLayer->m_uiLayer;
+        auto* existing = uiLayer->getChildByID("afterflow-timeline");
+        if (!Mod::get()->getSettingValue<bool>("show-timeline")) {
+            if (existing) {
+                existing->removeFromParent();
+            }
+            return;
+        }
+        if (existing) {
+            return;
+        }
+        auto* node = CCDrawNode::create();
+        node->setID("afterflow-timeline");
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        node->setPosition({ winSize.width / 2.f - 110.f, 18.f });
+        node->runAction(CCRepeatForever::create(CCSequence::create(
+            CCDelayTime::create(0.03f),
+            CallFuncExt::create([node] { drawTimeline(node); }),
+            nullptr
+        )));
+        uiLayer->addChild(node, 100);
+    }
+
+    void noteCleanInput(PlayLayer* gameLayer, bool isDown, PlayerObject* playerObject) {
+        ++state.attemptInputs;
+        ++state.attemptClean;
+        recordTimelineEvent(gameLayer, isDown, 0, playerObject ? playerObject->getPositionX() : 0.f);
+    }
+
+    void printAttemptSummary() {
+        bool hadActivity = state.attemptInputs > 0 || state.attemptMisses > 0 || state.attemptCorrections > 0;
+        if (hadActivity) {
+            float accuracy = state.attemptInputs > 0 ? 100.f * static_cast<float>(state.attemptClean) / static_cast<float>(state.attemptInputs) : 100.f;
+            if (state.attemptCorrections > 0) {
+                sayAlways("attempt {}: {} corrected, avg +{:.1f}t early, max +{}t, {} missed, {:.0f}% clean", g_attemptNumber, state.attemptCorrections,
+                    static_cast<double>(state.attemptShiftSum) / state.attemptCorrections, state.attemptShiftMax, state.attemptMisses, accuracy);
+            } else {
+                sayAlways("attempt {}: 0 corrected, {} missed, {:.0f}% clean", g_attemptNumber, state.attemptMisses, accuracy);
+            }
+
+            auto ref = currentLevelRef();
+            if (ref.valid) {
+                addLevelStat(ref, "attempts", 1);
+                addLevelStat(ref, "inputs", state.attemptInputs);
+                addLevelStat(ref, "clean", state.attemptClean);
+                addLevelStat(ref, "saves", state.attemptCorrections);
+                addLevelStat(ref, "shiftsum", state.attemptShiftSum);
+                if (state.attemptCorrections > levelStat(ref, "best")) {
+                    setLevelStat(ref, "best", state.attemptCorrections);
+                }
+            }
         }
         state.attemptCorrections = 0;
         state.attemptShiftSum = 0;
         state.attemptShiftMax = 0;
         state.attemptMisses = 0;
+        state.attemptInputs = 0;
+        state.attemptClean = 0;
+        ++g_attemptNumber;
+
+        auto* playLayer = GameManager::get()->m_playLayer;
+        if (playLayer && playLayer->m_uiLayer) {
+            if (auto* biasLabel = playLayer->m_uiLayer->getChildByID("afterflow-bias")) {
+                biasLabel->removeFromParent();
+            }
+        }
     }
 
     void dropCorrectionMarkers(PlayLayer* gameLayer) {
@@ -3292,12 +3957,16 @@ finally {
         }
     }
 
-    void noteShift(PlayLayer* gameLayer, PlayerObject* playerObject, int shiftTicks) {
+    void noteShift(PlayLayer* gameLayer, PlayerObject* playerObject, int shiftTicks, bool isDown) {
+        ++state.attemptInputs;
         ++state.attemptCorrections;
         state.attemptShiftSum += shiftTicks;
         state.attemptShiftMax = std::max(state.attemptShiftMax, shiftTicks);
         playComboSound(state.attemptCorrections);
         showCombo(gameLayer, state.attemptCorrections);
+        showMedal(gameLayer, state.attemptCorrections);
+        recordTimelineEvent(gameLayer, isDown, shiftTicks, playerObject ? playerObject->getPositionX() : 0.f);
+        updateBiasLabel(gameLayer);
 
         if (!gameLayer || !playerObject || !gameLayer->m_objectLayer) {
             return;
@@ -3324,12 +3993,104 @@ finally {
         ++state.markerCount;
     }
 
+    void drawReplayLines(PlayLayer* gameLayer, std::shared_ptr<std::vector<CCPoint>> const& uncorrectedPath,
+        std::shared_ptr<std::vector<CCPoint>> const& correctedPath, bool uncorrectedDied, bool correctedDied) {
+        auto* replayNode = static_cast<CCDrawNode*>(gameLayer->m_objectLayer->getChildByID("afterflow-replay"));
+        if (!replayNode) {
+            replayNode = CCDrawNode::create();
+            replayNode->setID("afterflow-replay");
+            gameLayer->m_objectLayer->addChild(replayNode, 1001);
+        }
+        replayNode->stopAllActions();
+        replayNode->clear();
+
+        auto stepIndex = std::make_shared<size_t>(1);
+        size_t stepCount = std::max(uncorrectedPath->size(), correctedPath->size());
+        if (stepCount < 2) {
+            return;
+        }
+        --stepCount;
+
+        if (!correctedPath->empty()) {
+            replayNode->drawDot(correctedPath->front(), 7.f, ccColor4F { 1.f, 1.f, 1.f, 0.25f });
+            replayNode->drawDot(correctedPath->front(), 3.f, ccColor4F { 1.f, 1.f, 1.f, 0.95f });
+        }
+
+        auto drawStep = [replayNode, uncorrectedPath, correctedPath, stepIndex, uncorrectedDied, correctedDied] {
+            ccColor4F uncorrectedColor = { 1.f, 0.28f, 0.28f, 0.95f };
+            ccColor4F correctedColor = { 0.3f, 1.f, 0.45f, 0.95f };
+            size_t index = *stepIndex;
+            auto drawPath = [&](std::vector<CCPoint> const& path, ccColor4F color, bool isEndMarked) {
+                if (index >= path.size()) {
+                    return;
+                }
+                ccColor4F glowColor = { color.r, color.g, color.b, 0.2f };
+                replayNode->drawSegment(path[index - 1], path[index], 3.4f, glowColor);
+                replayNode->drawSegment(path[index - 1], path[index], 1.2f, color);
+                if (index + 1 == path.size()) {
+                    replayNode->drawDot(path[index], 7.f, glowColor);
+                    replayNode->drawDot(path[index], isEndMarked ? 4.5f : 2.5f, color);
+                }
+            };
+            drawPath(*uncorrectedPath, uncorrectedColor, uncorrectedDied);
+            drawPath(*correctedPath, correctedColor, correctedDied);
+            ++(*stepIndex);
+        };
+
+        replayNode->runAction(CCSequence::create(
+            CCRepeat::create(
+                CCSequence::create(CCDelayTime::create(0.006f), CallFuncExt::create(drawStep), nullptr),
+                static_cast<unsigned int>(stepCount)
+            ),
+            CCDelayTime::create(2.5f),
+            CallFuncExt::create([replayNode] { replayNode->clear(); }),
+            nullptr
+        ));
+    }
+
+    void runGhostRace(PlayLayer* gameLayer, std::shared_ptr<std::vector<CCPoint>> const& uncorrectedPath) {
+        auto* raceNode = static_cast<CCDrawNode*>(gameLayer->m_objectLayer->getChildByID("afterflow-ghost-race"));
+        if (!raceNode) {
+            raceNode = CCDrawNode::create();
+            raceNode->setID("afterflow-ghost-race");
+            gameLayer->m_objectLayer->addChild(raceNode, 1002);
+        }
+        raceNode->stopAllActions();
+        raceNode->clear();
+        if (uncorrectedPath->size() < 2) {
+            return;
+        }
+
+        auto stepIndex = std::make_shared<size_t>(0);
+        auto drawStep = [raceNode, uncorrectedPath, stepIndex] {
+            size_t index = std::min(*stepIndex, uncorrectedPath->size() - 1);
+            auto const& point = (*uncorrectedPath)[index];
+            raceNode->clear();
+            raceNode->drawDot(point, 11.f, ccColor4F { 1.f, 0.3f, 0.3f, 0.18f });
+            raceNode->drawDot(point, 6.f, ccColor4F { 1.f, 0.35f, 0.35f, 0.55f });
+            raceNode->drawDot(point, 2.5f, ccColor4F { 1.f, 1.f, 1.f, 0.9f });
+            ++(*stepIndex);
+        };
+
+        raceNode->runAction(CCSequence::create(
+            CCRepeat::create(
+                CCSequence::create(CCDelayTime::create(1.f / 240.f), CallFuncExt::create(drawStep), nullptr),
+                static_cast<unsigned int>(uncorrectedPath->size())
+            ),
+            CCDelayTime::create(0.3f),
+            CallFuncExt::create([raceNode] { raceNode->clear(); }),
+            nullptr
+        ));
+    }
+
     void drawCorrectionReplay(PlayLayer* gameLayer, PlayerObject* player1, PlayerObject* player2, bool isDual, bool isDown,
         int savedTick, int horizonTicks, int releaseAfterTicks) {
         if (!gameLayer || !gameLayer->m_objectLayer || state.isSimulating) {
             return;
         }
-        if (!Mod::get()->getSettingValue<bool>("show-correction-replay")) {
+        bool wantReplay = Mod::get()->getSettingValue<bool>("show-correction-replay");
+        bool wantGhostRace = Mod::get()->getSettingValue<bool>("show-ghost-race");
+        if (!wantReplay && !wantGhostRace) {
             return;
         }
 
@@ -3353,62 +4114,17 @@ finally {
         state.retapTick = oldRetapTick;
         state.orbClickEnabled = oldOrbClickEnabled;
 
-        auto* replayNode = static_cast<CCDrawNode*>(gameLayer->m_objectLayer->getChildByID("afterflow-replay"));
-        if (!replayNode) {
-            replayNode = CCDrawNode::create();
-            replayNode->setID("afterflow-replay");
-            gameLayer->m_objectLayer->addChild(replayNode, 1001);
-        }
-        replayNode->stopAllActions();
-        replayNode->clear();
-
         sayVerbose("replay: uncorrected {} after {} points, corrected {} after {} points", uncorrectedDied ? "dies" : "survives",
             uncorrectedPath.size(), correctedDied ? "dies" : "survives", correctedPath.size());
 
         auto uncorrectedShared = std::make_shared<std::vector<CCPoint>>(std::move(uncorrectedPath));
         auto correctedShared = std::make_shared<std::vector<CCPoint>>(std::move(correctedPath));
-        auto stepIndex = std::make_shared<size_t>(1);
-        size_t stepCount = std::max(uncorrectedShared->size(), correctedShared->size());
-        if (stepCount < 2) {
-            return;
+        if (wantReplay) {
+            drawReplayLines(gameLayer, uncorrectedShared, correctedShared, uncorrectedDied, correctedDied);
         }
-        --stepCount;
-
-        if (!correctedShared->empty()) {
-            replayNode->drawDot(correctedShared->front(), 7.f, ccColor4F { 1.f, 1.f, 1.f, 0.25f });
-            replayNode->drawDot(correctedShared->front(), 3.f, ccColor4F { 1.f, 1.f, 1.f, 0.95f });
+        if (wantGhostRace) {
+            runGhostRace(gameLayer, uncorrectedShared);
         }
-
-        auto drawStep = [replayNode, uncorrectedShared, correctedShared, stepIndex, uncorrectedDied, correctedDied] {
-            ccColor4F uncorrectedColor = { 1.f, 0.28f, 0.28f, 0.95f };
-            ccColor4F correctedColor = { 0.3f, 1.f, 0.45f, 0.95f };
-            size_t index = *stepIndex;
-            auto drawPath = [&](std::vector<CCPoint> const& path, ccColor4F color, bool isEndMarked) {
-                if (index >= path.size()) {
-                    return;
-                }
-                ccColor4F glowColor = { color.r, color.g, color.b, 0.2f };
-                replayNode->drawSegment(path[index - 1], path[index], 3.4f, glowColor);
-                replayNode->drawSegment(path[index - 1], path[index], 1.2f, color);
-                if (index + 1 == path.size()) {
-                    replayNode->drawDot(path[index], 7.f, glowColor);
-                    replayNode->drawDot(path[index], isEndMarked ? 4.5f : 2.5f, color);
-                }
-            };
-            drawPath(*uncorrectedShared, uncorrectedColor, uncorrectedDied);
-            drawPath(*correctedShared, correctedColor, correctedDied);
-            ++(*stepIndex);
-        };
-
-        replayNode->runAction(CCSequence::create(
-            CCRepeat::create(
-                CCSequence::create(CCDelayTime::create(0.006f), CallFuncExt::create(drawStep), nullptr),
-                static_cast<unsigned int>(stepCount)
-            ),
-            CCDelayTime::create(2.5f),
-            CallFuncExt::create([replayNode] { replayNode->clear(); }),
-            nullptr
-        ));
     }
 
     void queueInput(int tickCount, bool isDown) {
@@ -3567,7 +4283,7 @@ finally {
                 say("orb {} +{}t ({:g}f) -> {}t", state.wasOrbTiming ? "timing" : "press", candidateDelay, candidateDelay * TICK_DURATION, orbLandingTick);
                 state.inputShiftTicks = candidateDelay;
                 showShiftHud(playLayer, isDown, candidateDelay);
-                noteShift(playLayer, player1, candidateDelay);
+                noteShift(playLayer, player1, candidateDelay, true);
                 queueInput(candidateDelay - earlyTicks, isDown);
                 return true;
             }
@@ -3594,6 +4310,7 @@ finally {
         std::string tickTagText = midTickFraction > 0.f ? fmt::format(" @{:.2f}", midTickFraction) : std::string();
         if (baseDelay >= horizonTicks) {
             sayVerbose("clear: {}{} survives {}t, left alone", isDown ? "press" : "release", tickTagText, horizonTicks);
+            noteCleanInput(playLayer, isDown, player1);
             state.hasAppliedInput = isDown;
             return false;
         }
@@ -3628,6 +4345,7 @@ finally {
 
         if (savedTick <= 0) {
             ++state.attemptMisses;
+            ++state.attemptInputs;
             say("no save: {}{} dies in {}t (max {}t, best +{}t -> {}t of {})", isDown ? "press" : "release", tickTagText, baseDelay, maxDelayTicks,
                 debugBestDelay, debugBestResult, horizonTicks);
             state.hasAppliedInput = isDown;
@@ -3658,7 +4376,7 @@ finally {
             : isRobotPress ? fmt::format("  hold {}t", robotUsedHoldTicks) : std::string());
         state.inputShiftTicks = savedTick;
         showShiftHud(playLayer, isDown, savedTick);
-        noteShift(playLayer, player1, savedTick);
+        noteShift(playLayer, player1, savedTick, isDown);
         drawCorrectionReplay(playLayer, player1, player2, isDual, isDown, savedTick, horizonTicks, releaseAfterTicks);
         queueInput(savedTick - earlyTicks, isDown);
         return true;
@@ -3698,6 +4416,54 @@ finally {
         catch (...) {
             log::warn("could not start cycle watcher");
         }
+    }
+
+    void updateDangerPreview(PlayLayer* gameLayer, PlayerObject* player1) {
+        if (!gameLayer || !player1) {
+            return;
+        }
+        auto* glow = static_cast<CCDrawNode*>(player1->getChildByID("afterflow-danger"));
+        if (!Mod::get()->getSettingValue<bool>("danger-preview")) {
+            if (glow) {
+                glow->setVisible(false);
+            }
+            return;
+        }
+        if (state.isSimulating || !state.isEnabled || !state.ghostPlayer1 || gameLayer->m_isPaused || gameLayer->m_isPlatformer || player1->m_isDead) {
+            return;
+        }
+        bool isTwoPlayer = gameLayer->m_level && gameLayer->m_level->m_twoPlayerMode;
+        if (isTwoPlayer || gameLayer->m_gameState.m_isDualMode) {
+            if (glow) {
+                glow->setVisible(false);
+            }
+            return;
+        }
+        if (++state.dangerTicker % 8 != 0) {
+            return;
+        }
+        if (!glow) {
+            glow = CCDrawNode::create();
+            glow->setID("afterflow-danger");
+            glow->drawDot({ 0.f, 0.f }, 24.f, ccColor4F { 1.f, 0.2f, 0.2f, 0.16f });
+            glow->drawDot({ 0.f, 0.f }, 14.f, ccColor4F { 1.f, 0.25f, 0.25f, 0.3f });
+            glow->setVisible(false);
+            player1->addChild(glow, -1);
+        }
+
+        clickStartTime = std::chrono::steady_clock::now();
+        clickBudget();
+        int oldRetapTick = state.retapTick;
+        bool oldOrbClickEnabled = state.orbClickEnabled;
+        state.retapTick = -1;
+        state.orbClickEnabled = false;
+        SimEnd dangerEnd;
+        simulate(gameLayer, player1, nullptr, false, 0, true, 40, -1, 40, &dangerEnd);
+        bool wouldDie = state.hasGhostDied;
+        state.retapTick = oldRetapTick;
+        state.orbClickEnabled = oldOrbClickEnabled;
+        sweepGhostLayer();
+        glow->setVisible(wouldDie);
     }
 
     void deliverPending(PlayLayer* gameLayer, PlayerObject* playerObject) {
@@ -3822,6 +4588,9 @@ class $modify(BufPlayLayer, PlayLayer) {
         applyStage();
         state.markerCount = 0;
         state.attemptCorrections = state.attemptShiftSum = state.attemptShiftMax = state.attemptMisses = 0;
+        state.attemptInputs = state.attemptClean = state.dangerTicker = 0;
+        g_timeline.clear();
+        g_attemptNumber = 1;
         state.ghostPlayer1 = makeGhost(this);
         state.ghostPlayer2 = makeGhost(this);
         state.ghostLayerBaseIndex = state.ghostRenderLayer->getChildrenCount();
@@ -4002,6 +4771,7 @@ class $modify(BufPlayerObject, PlayerObject) {
                 float average = state.tickLengthSeconds;
                 state.tickLengthSeconds = (average > 0.f && std::abs(deltaTime - average) < average * 0.3f) ? average * 0.9f + deltaTime * 0.1f : deltaTime;
             }
+            updateDangerPreview(gameLayer, this);
         }
     }
 
